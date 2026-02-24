@@ -1,0 +1,22 @@
+# FastAPI and server dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+aiofiles>=23.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Video processing
+opencv-python>=4.8.0
+imageio[ffmpeg]>=2.31.0
+
+# 3D processing and alignment
+scipy>=1.11.0
+fastdtw>=0.3.4
+
+# HTTP client for downloading videos
+httpx>=0.25.0
+
+# Monitoring and logging
+prometheus-client>=0.19.0
+structlog>=23.0.0
