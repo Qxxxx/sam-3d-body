@@ -178,8 +178,11 @@ class VideoFrameExtractor:
             )
 
             # Calculate frame extraction parameters
-            fps_ratio = self.target_fps / original_fps if original_fps > 0 else 1.0
-            frame_interval = int(1 / fps_ratio) if fps_ratio <= 1 else 1
+            if original_fps > 0 and self.target_fps > 0:
+                # Fractional frame step avoids flooring artifacts (e.g., 30->20fps).
+                frame_step = max(original_fps / self.target_fps, 1.0)
+            else:
+                frame_step = 1.0
 
             # Time range in frames
             start_frame = int((start_time or 0) * original_fps) if start_time else 0
@@ -193,6 +196,7 @@ class VideoFrameExtractor:
             frames: List[FrameData] = []
             current_frame = start_frame
             frame_counter = 0
+            next_sample_counter = 0.0
 
             while current_frame < end_frame:
                 ret, frame = cap.read()
@@ -201,7 +205,7 @@ class VideoFrameExtractor:
                     break
 
                 # Extract frame at target FPS
-                if frame_counter % frame_interval == 0:
+                if frame_counter + 1e-9 >= next_sample_counter:
                     # Convert BGR to RGB
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     timestamp = current_frame / original_fps
@@ -213,6 +217,7 @@ class VideoFrameExtractor:
                             image=frame_rgb,
                         )
                     )
+                    next_sample_counter += frame_step
 
                 current_frame += 1
                 frame_counter += 1

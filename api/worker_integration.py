@@ -133,7 +133,7 @@ class WorkerIntegration:
 
                 # Step 5: Call alignment
                 logger.info(f"[Task {task_id}] Calling alignment")
-                user_skeleton_url = f"r2://{skeleton_object_key}"
+                user_skeleton_url = await self._get_presigned_url(skeleton_object_key)
 
                 alignment_result = await client.align_sequences(
                     user_skeleton_url=user_skeleton_url,
@@ -189,7 +189,11 @@ class WorkerIntegration:
             logger.error(f"[Task {task_id}] Unexpected error: {e}")
             await self._handle_error(
                 task_id,
-                InferenceError(str(e), error_code="INTERNAL_ERROR")
+                InferenceError(
+                    str(e),
+                    status_code=500,
+                    details={"error_code": "INTERNAL_ERROR"},
+                ),
             )
             return {
                 "success": False,

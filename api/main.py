@@ -10,12 +10,17 @@ Provides endpoints for:
 """
 
 import logging
+import os
+import tempfile
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
+import cv2
+import httpx
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException, status
@@ -145,6 +150,155 @@ def convert_mhr70_to_coco17(mhr70_joints: np.ndarray) -> np.ndarray:
         for coco_idx, mhr_idx in MHR70_TO_COCO17_INDICES.items():
             coco17[:, coco_idx, :] = mhr70_joints[:, mhr_idx, :]
         return coco17
+
+
+def _normalize_remote_skeleton_npz_url(source_url: str) -> str:
+    """Normalize remote skeleton URL to its NPZ location."""
+    parts = urlsplit(source_url)
+    path = parts.path
+
+    if path.endswith(".npz"):
+        npz_path = path
+    elif path.endswith(".mp4"):
+        npz_path = path[:-4] + ".npz"
+    else:
+        npz_path = f"{path}.npz"
+
+    return urlunsplit((parts.scheme, parts.netloc, npz_path, parts.query, parts.fragment))
+
+
+def _derive_remote_json_url(npz_url: str) -> str:
+    """Build sidecar JSON URL from an NPZ URL."""
+    parts = urlsplit(npz_url)
+    path = parts.path[:-4] + ".json" if parts.path.endswith(".npz") else f"{parts.path}.json"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
+async def _download_remote_file(url: str, suffix: str, temp_files: List[Path]) -> Path:
+    """Download a remote file to a managed temporary path."""
+    fd, temp_name = tempfile.mkstemp(prefix="alignment_", suffix=suffix, dir=config.temp_dir)
+    os.close(fd)
+    temp_path = Path(temp_name)
+    temp_files.append(temp_path)
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=300.0) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        temp_path.write_bytes(response.content)
+
+    return temp_path
+
+
+def _load_sequence_from_local_files(
+    serializer: SkeletonSerializer,
+    npz_path: Path,
+    json_path: Optional[Path] = None,
+) -> SkeletonSequence:
+    """
+    Load skeleton sequence from local files.
+
+    Falls back to NPZ-only loading if JSON metadata is unavailable.
+    """
+    if json_path and json_path.exists():
+        return serializer.load(npz_path, json_path)
+
+    with np.load(npz_path) as data:
+        joints = data["joints"]
+        timestamps = data["timestamps"]
+        confidences = data["confidences"] if "confidences" in data.files else None
+
+    return SkeletonSequence(
+        joints=joints,
+        timestamps=timestamps,
+        confidences=confidences,
+        joint_names=COCO17_JOINT_NAMES,
+    )
+
+
+async def _load_sequence_from_source(
+    serializer: SkeletonSerializer,
+    source_url: str,
+    source_label: str,
+    temp_files: List[Path],
+) -> SkeletonSequence:
+    """Load skeleton sequence from local file paths or remote HTTP(S) URLs."""
+    parsed = urlparse(source_url)
+    scheme = parsed.scheme.lower()
+
+    if scheme in ("", "file"):
+        local_path = Path(parsed.path if scheme == "file" else source_url)
+        if local_path.suffix == ".mp4":
+            npz_path = local_path.with_suffix(".npz")
+        elif local_path.suffix == ".npz":
+            npz_path = local_path
+        else:
+            npz_path = Path(f"{local_path}.npz")
+
+        if not npz_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"VIDEO_NOT_FOUND: {source_label} skeleton not found at {npz_path}",
+            )
+
+        json_path = npz_path.with_suffix(".json")
+        try:
+            return _load_sequence_from_local_files(serializer, npz_path, json_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"INVALID_SKELETON_FORMAT: Failed to parse {source_label}",
+            ) from e
+
+    if scheme in ("http", "https"):
+        npz_url = _normalize_remote_skeleton_npz_url(source_url)
+        json_url = _derive_remote_json_url(npz_url)
+
+        try:
+            npz_path = await _download_remote_file(npz_url, ".npz", temp_files)
+        except httpx.HTTPStatusError as e:
+            status_code = (
+                status.HTTP_404_NOT_FOUND
+                if e.response is not None and e.response.status_code == 404
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail=f"REMOTE_SKELETON_DOWNLOAD_FAILED: Could not download {source_label} from {npz_url}",
+            ) from e
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"REMOTE_SKELETON_DOWNLOAD_FAILED: Could not download {source_label} from {npz_url}",
+            ) from e
+
+        json_path = None
+        try:
+            json_path = await _download_remote_file(json_url, ".json", temp_files)
+        except Exception as e:
+            logger.warning(
+                "Failed to download skeleton metadata JSON for %s (%s). Falling back to NPZ-only loading.",
+                source_label,
+                e,
+            )
+
+        try:
+            return _load_sequence_from_local_files(serializer, npz_path, json_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"INVALID_SKELETON_FORMAT: Failed to parse {source_label}",
+            ) from e
+
+    if scheme == "r2":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"INVALID_SKELETON_URL: {source_label} uses r2://. Provide a presigned https:// URL.",
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"INVALID_SKELETON_URL: Unsupported URL scheme '{scheme}' for {source_label}",
+    )
 
 
 @app.on_event("startup")
@@ -328,8 +482,27 @@ async def infer_video(request: VideoInferenceRequest):
                 # Get bbox for this frame
                 bbox = None
                 if tracker:
-                    # TODO: Run detector and use tracker to select bbox
-                    pass
+                    detected_bboxes = None
+                    if estimator.detector is not None:
+                        try:
+                            frame_bgr = cv2.cvtColor(frame_data.image, cv2.COLOR_RGB2BGR)
+                            detected_bboxes = estimator.detector.run_human_detection(
+                                frame_bgr,
+                                det_cat_id=0,
+                                bbox_thr=0.5,
+                                nms_thr=0.3,
+                                default_to_full_image=False,
+                            )
+                            detected_bboxes = np.asarray(detected_bboxes, dtype=np.float32).reshape(-1, 4)
+                        except Exception as e:
+                            logger.warning(f"[Task {task_id}] Detector failed on frame {i}: {e}")
+
+                    tracked_bbox = tracker.get_bbox_for_frame(
+                        frame_idx=i,
+                        detected_bboxes=detected_bboxes,
+                    )
+                    if tracked_bbox is not None:
+                        bbox = np.asarray(tracked_bbox, dtype=np.float32).reshape(1, 4)
 
                 # Run inference
                 outputs = estimator.process_one_image(
@@ -450,6 +623,7 @@ async def infer_alignment(request: AlignmentRequest):
     """
     task_id = str(uuid.uuid4())
     start_time = time.time()
+    temp_files: List[Path] = []
 
     logger.info(f"[Task {task_id}] Starting alignment")
 
@@ -460,26 +634,20 @@ async def infer_alignment(request: AlignmentRequest):
         serializer = SkeletonSerializer()
 
         # Load user skeleton
-        user_npz = request.video_url.replace("file://", "").replace(".mp4", ".npz")  # Hack for testing
-        if not user_npz.endswith(".npz"):
-            user_npz = user_npz + ".npz"
-        user_json = user_npz.replace(".npz", ".json")
-
-        # In production, these would be actual skeleton URLs
-        # For now, assume they're already processed
-        if not Path(user_npz).exists():
-            # Return mock result for testing
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="VIDEO_NOT_FOUND: User skeleton not found. Process video first.",
-            )
-
-        user_sequence = serializer.load(user_npz, user_json)
+        user_sequence = await _load_sequence_from_source(
+            serializer=serializer,
+            source_url=request.video_url,
+            source_label="video_url",
+            temp_files=temp_files,
+        )
 
         # Load reference skeleton
-        ref_npz = request.reference_skeleton_url.replace("file://", "")
-        ref_json = ref_npz.replace(".npz", ".json")
-        reference_sequence = serializer.load(ref_npz, ref_json)
+        reference_sequence = await _load_sequence_from_source(
+            serializer=serializer,
+            source_url=request.reference_skeleton_url,
+            source_label="reference_skeleton_url",
+            temp_files=temp_files,
+        )
 
         logger.info(
             f"[Task {task_id}] Loaded user={user_sequence.num_frames}frames, "
@@ -609,6 +777,12 @@ async def infer_alignment(request: AlignmentRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"ALIGNMENT_FAILED: {str(e)}",
         )
+    finally:
+        for temp_file in temp_files:
+            try:
+                temp_file.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"[Task {task_id}] Failed to cleanup temp file {temp_file}: {e}")
 
 
 # Error handlers

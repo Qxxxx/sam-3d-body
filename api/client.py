@@ -8,8 +8,8 @@ implementation or used directly if the worker is Python-based.
 Protocol v1.0.0 compliant.
 """
 
+import asyncio
 import logging
-import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import urljoin
@@ -148,7 +148,7 @@ class Sam3dBodyClient:
             if attempt < max_retries - 1:
                 wait_time = self.config.retry_delay_seconds * (attempt + 1)
                 logger.info(f"Retrying in {wait_time}s...")
-                time.sleep(wait_time)
+                await asyncio.sleep(wait_time)
 
         # All retries exhausted
         raise InferenceError(f"Request failed after {max_retries} attempts: {last_error}")
