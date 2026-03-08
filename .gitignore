@@ -119,3 +119,4 @@ debug/
 **/.dist_test
 sandbox*
 *.sh
+!scripts/run_linux_pytest.sh
