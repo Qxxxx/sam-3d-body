@@ -1,0 +1,7 @@
+fastapi
+eval_type_backport
+httpx
+numpy
+opencv-python-headless
+pydantic
+pytest

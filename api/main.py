@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import numpy as np
@@ -12,9 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from sam_3d_body import (
-    SAM3DBodyEstimator,
     __version__,
-    load_sam_3d_body,
 )
 from sam_3d_body.reference_assets import (
     DEFAULT_METADATA_FILENAME,
@@ -35,17 +33,21 @@ from .models import (
     dump_alias_model,
 )
 
+if TYPE_CHECKING:
+    from sam_3d_body import SAM3DBodyEstimator
+
 
 @dataclass
 class ServiceState:
     settings: ApiSettings
-    estimator: SAM3DBodyEstimator | Any | None = None
+    estimator: "SAM3DBodyEstimator | Any | None" = None
     estimator_load_error: str | None = None
     estimator_lock: Lock = field(default_factory=Lock)
 
 
-def _build_estimator(settings: ApiSettings) -> SAM3DBodyEstimator:
+def _build_estimator(settings: ApiSettings) -> "SAM3DBodyEstimator":
     from tools.build_fov_estimator import FOVEstimator
+    from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body
 
     checkpoint_path = Path(settings.checkpoint_path)
     mhr_path = Path(settings.mhr_path)
@@ -83,7 +85,7 @@ def _map_service_exception(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=f"Internal server error: {exc}")
 
 
-def _ensure_estimator(state: ServiceState) -> SAM3DBodyEstimator | Any:
+def _ensure_estimator(state: ServiceState) -> "SAM3DBodyEstimator | Any":
     if state.estimator is not None:
         return state.estimator
 
@@ -166,7 +168,7 @@ def _build_asset_entry(payload: VideoInferenceRequest) -> ReferenceVideoEntry:
 def create_app(
     *,
     settings: ApiSettings | None = None,
-    estimator: SAM3DBodyEstimator | Any | None = None,
+    estimator: "SAM3DBodyEstimator | Any | None" = None,
 ) -> FastAPI:
     resolved_settings = settings or load_api_settings()
     service_state = ServiceState(

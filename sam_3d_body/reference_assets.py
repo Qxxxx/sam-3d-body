@@ -5,21 +5,23 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 import cv2
 import numpy as np
 
-from .sam_3d_body_estimator import SAM3DBodyEstimator
 from .technique_alignment import SkeletonSequence, normalize_skeleton_sequence
 from .video_processor import (
-    VideoExtractionConfig,
+  VideoExtractionConfig,
     _horizontal_fov_deg_from_intrinsics,
     _normalize_cam_intrinsics,
     _resolve_video_file,
     _select_person_output,
     _validate_selection_bbox_xyxy,
 )
+
+if TYPE_CHECKING:
+    from .sam_3d_body_estimator import SAM3DBodyEstimator
 
 
 DEFAULT_METADATA_FILENAME = "metadata.json"
