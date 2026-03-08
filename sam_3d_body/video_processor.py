@@ -5,15 +5,17 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import cv2
 import numpy as np
 
-from .sam_3d_body_estimator import SAM3DBodyEstimator
 from .technique_alignment import SkeletonSequence
+
+if TYPE_CHECKING:
+    from .sam_3d_body_estimator import SAM3DBodyEstimator
 
 _REMOTE_VIDEO_SCHEMES = {"http", "https"}
 

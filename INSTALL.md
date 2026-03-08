@@ -1,5 +1,33 @@
 # Installation Guide for SAM 3D Body
 
+## Duolian Harness Paths
+
+Local development, tests, and inference in this fork are Linux-only.
+
+Expected development environment:
+
+```bash
+conda create -n sam_3d_body python=3.11 -y
+conda activate sam_3d_body
+```
+
+For deterministic CI or lightweight local validation on Linux, install the
+reduced dependency set:
+
+```bash
+pip install -r requirements-ci.txt
+```
+
+For local development helpers on Linux:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+These files are additive and are meant for the Duolian fork's harness lanes.
+They do not replace the full upstream runtime stack required for checkpointed
+model inference.
+
 ## Setup Python Environment
 
 ### 1. Create and Activate Environment
@@ -8,6 +36,9 @@
 conda create -n sam_3d_body python=3.11 -y
 conda activate sam_3d_body
 ```
+
+The helper script `scripts/run_linux_pytest.sh` assumes this exact environment
+name.
 
 ### 2. Install PyTorch
 
@@ -51,4 +82,3 @@ We host model checkpoints on Hugging Face. **Available models:**
 ⚠️ Please note that you need to **request access** on the SAM 3D Body Hugging Face repos above. Once accepted, you need to be authenticated to download the checkpoints.
 
 ⚠️ SAM 3D Body is available via HuggingFace globally, **except** in comprehensively sanctioned jurisdictions. Sanctioned jurisdiction will result in requests being **rejected**.
-

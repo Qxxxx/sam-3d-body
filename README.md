@@ -74,6 +74,47 @@ SAM 3D Body is one part of SAM 3D, a pair of models for object and human mesh re
 
 **11/19/2025** -- Checkpoints Launched, Dataset Released, Web Demo and Paper are out!
 
+## Duolian Fork Harness Notes
+
+This fork stays intentionally close to upstream. Duolian-specific changes should
+stay narrow and focused on local harnessing, contract validation, and service
+integration.
+
+Linux-only runtime:
+
+- local development, tests, and inference are supported only on Linux
+- the expected developer environment is `conda activate sam_3d_body`
+
+Deterministic local setup on Linux:
+
+```bash
+conda create -n sam_3d_body python=3.11 -y
+conda activate sam_3d_body
+python -m pip install -r requirements-ci.txt
+```
+
+Developer extras on Linux:
+
+```bash
+conda activate sam_3d_body
+python -m pip install -r requirements-dev.txt
+```
+
+Deterministic validation lanes:
+
+```bash
+./scripts/run_linux_pytest.sh tests/test_api_main.py tests/test_build_reference_assets_script.py tests/test_reference_assets.py tests/test_technique_alignment.py tests/test_video_processor.py
+./scripts/run_linux_pytest.sh tests/test_reference_assets_contract.py
+```
+
+Reference asset metadata is a public contract consumed by `cf-backend` and
+`duolian_v2`.
+
+- current metadata schema: `technique_reference_assets.v2`
+- current render schema: `technique_reference_render.v1`
+
+Repo-tracked samples must not contain machine-local absolute paths.
+
 ## Installation
 See [INSTALL.md](INSTALL.md) for instructions for python environment setup and model checkpoint access.
 
@@ -145,6 +186,9 @@ This command writes three files to `--output-dir`:
 - `metadata.json`
 
 You can optionally override the generated reference ID with `--reference-id` and pass `--selection-point-px X Y` to lock onto a specific person in multi-person videos.
+
+The generated `metadata.json` is versioned and should preserve backward
+compatibility unless the schema version is explicitly bumped.
 
 
 ## Model Description

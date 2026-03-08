@@ -9,15 +9,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from sam_3d_body import ReferenceVideoEntry, SAM3DBodyEstimator, load_sam_3d_body
-from sam_3d_body.reference_assets import build_reference_assets
+from sam_3d_body.reference_assets import ReferenceVideoEntry, build_reference_assets
 from sam_3d_body.video_processor import VideoExtractionConfig
+
+if TYPE_CHECKING:
+    from sam_3d_body import SAM3DBodyEstimator
 
 
 _DEFAULT_CHECKPOINT_DIR = (
@@ -207,6 +209,8 @@ def _load_entry(args: argparse.Namespace) -> ReferenceVideoEntry:
 
 
 def _load_estimator(args: argparse.Namespace) -> SAM3DBodyEstimator:
+    from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body
+
     model, model_cfg = load_sam_3d_body(
         checkpoint_path=args.checkpoint_path,
         device=args.device,
