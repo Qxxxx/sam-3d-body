@@ -187,6 +187,27 @@ This command writes three files to `--output-dir`:
 
 You can optionally override the generated reference ID with `--reference-id` and pass `--selection-point-px X Y` to lock onto a specific person in multi-person videos.
 
+To publish the generated asset bundle to Cloudflare in one step, including the
+source reference video, run:
+
+```bash
+python scripts/build_reference_assets.py \
+    --video-path ./data/reference_videos/smash.mp4 \
+    --action-type smash \
+    --reference-id smash_side_demo \
+    --output-dir ./out/reference-assets/smash_side_demo \
+    --checkpoint-path ./checkpoints/sam-3d-body-dinov3/model.ckpt \
+    --mhr-path ./checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt \
+    --publish \
+    --cf-target remote \
+    --cf-env staging
+```
+
+With `--publish`, the script uploads the skeleton asset, render asset, and
+source video to R2, then upserts one `technique_reference_assets` row in D1.
+Pass `--skip-source-video-upload` only if you intentionally want to keep the
+original `sourceVideoPath` value instead of uploading the source video.
+
 The generated `metadata.json` is versioned and should preserve backward
 compatibility unless the schema version is explicitly bumped.
 

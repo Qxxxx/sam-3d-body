@@ -142,6 +142,21 @@ def test_parse_args_defaults_target_fps_to_30() -> None:
     assert args.target_fps == 30.0
 
 
+def test_parse_args_uploads_source_video_by_default() -> None:
+    args = script.parse_args(
+        [
+            "--video-path",
+            "/tmp/video.mp4",
+            "--output-dir",
+            "out",
+            "--action-type",
+            "smash",
+        ]
+    )
+
+    assert args.skip_source_video_upload is False
+
+
 def test_load_entry_defaults_reference_id_from_video_name(tmp_path: Path) -> None:
     video_path = tmp_path / "Smash Pro 01.mp4"
     video_path.touch()
@@ -239,8 +254,10 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    source_video_path = tmp_path / "source.mp4"
     skeleton_path = tmp_path / "smash_ref_001.npz"
     render_path = tmp_path / "smash_ref_001.render.npz"
+    source_video_path.write_bytes(b"source")
     skeleton_path.write_bytes(b"skeleton")
     render_path.write_bytes(b"render")
 
@@ -253,7 +270,7 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
                 "athleteName": "athlete_a",
                 "cameraView": "side",
                 "handedness": "right",
-                "sourceVideoPath": "/tmp/source.mp4",
+                "sourceVideoPath": str(source_video_path),
                 "skeletonPath": str(skeleton_path),
                 "renderAssetPath": str(render_path),
                 "videoConfig": {"targetFps": 12.0},
@@ -278,6 +295,8 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
         skeleton_version="sam3db_v1",
         priority_score=100,
         is_active=1,
+        source_video_r2_prefix="refs-source",
+        skip_source_video_upload=False,
     )
 
     commands: list[list[str]] = []
@@ -299,7 +318,8 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
     summary = script._publish_assets(args, metadata)
 
     assert summary["upsertedAssetCount"] == 1
-    assert summary["uploadFileCount"] == 2
+    assert summary["uploadFileCount"] == 3
+    assert summary["sourceVideoUploadCount"] == 1
     assert summary["renderAssetColumnDetected"] is True
     assert summary["cfTarget"] == "remote"
     assert summary["upsertedAssetIds"] == ["smash_smash_ref_001"]
@@ -309,10 +329,13 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
         for command in commands
         if len(command) >= 5 and command[:5] == ["npx", "wrangler", "r2", "object", "put"]
     ]
-    assert len(r2_put_commands) == 2
+    assert len(r2_put_commands) == 3
     assert r2_put_commands[0][5] == "duolian-storage-staging/refs/smash/smash_ref_001/smash_ref_001.npz"
     assert r2_put_commands[1][5] == (
         "duolian-storage-staging/refs/smash/smash_ref_001/smash_ref_001.render.npz"
+    )
+    assert r2_put_commands[2][5] == (
+        "duolian-storage-staging/refs-source/smash/smash_ref_001/source.mp4"
     )
     assert "--remote" in r2_put_commands[0]
 
@@ -331,14 +354,18 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
         "https://assets.example.com/refs/smash/smash_ref_001/smash_ref_001.render.npz"
         in upsert_sql
     )
+    assert "https://assets.example.com/refs-source/smash/smash_ref_001/source.mp4" in upsert_sql
+    assert '"sourceVideo": "refs-source/smash/smash_ref_001/source.mp4"' in upsert_sql
 
 
 def test_publish_assets_skips_render_column_when_db_not_migrated(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    source_video_path = tmp_path / "source.mp4"
     skeleton_path = tmp_path / "clear_ref_001.npz"
     render_path = tmp_path / "clear_ref_001.render.npz"
+    source_video_path.write_bytes(b"source")
     skeleton_path.write_bytes(b"skeleton")
     render_path.write_bytes(b"render")
 
@@ -348,7 +375,7 @@ def test_publish_assets_skips_render_column_when_db_not_migrated(
             {
                 "referenceId": "clear_ref_001",
                 "actionType": "clear",
-                "sourceVideoPath": "/tmp/source.mp4",
+                "sourceVideoPath": str(source_video_path),
                 "skeletonPath": str(skeleton_path),
                 "renderAssetPath": str(render_path),
                 "videoConfig": {"targetFps": 10.0},
@@ -370,6 +397,8 @@ def test_publish_assets_skips_render_column_when_db_not_migrated(
         skeleton_version="sam3db_v1",
         priority_score=100,
         is_active=1,
+        source_video_r2_prefix="source-videos",
+        skip_source_video_upload=False,
     )
 
     commands: list[list[str]] = []
@@ -390,6 +419,8 @@ def test_publish_assets_skips_render_column_when_db_not_migrated(
 
     summary = script._publish_assets(args, metadata)
     assert summary["renderAssetColumnDetected"] is False
+    assert summary["uploadFileCount"] == 3
+    assert summary["sourceVideoUploadCount"] == 1
 
     upsert_command = next(
         command
@@ -402,6 +433,88 @@ def test_publish_assets_skips_render_column_when_db_not_migrated(
     upsert_sql = next(token for token in upsert_command if "INSERT INTO technique_reference_assets" in token)
     assert "render_asset_url" not in upsert_sql
     assert "r2://duolian-storage/refs/clear/clear_ref_001/clear_ref_001.npz" in upsert_sql
+    assert "r2://duolian-storage/source-videos/clear/clear_ref_001/source.mp4" in upsert_sql
+
+
+def test_publish_assets_keeps_existing_source_video_url_when_upload_is_skipped(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    skeleton_path = tmp_path / "drop_ref_001.npz"
+    render_path = tmp_path / "drop_ref_001.render.npz"
+    skeleton_path.write_bytes(b"skeleton")
+    render_path.write_bytes(b"render")
+
+    metadata = {
+        "skeletonVersion": "sam3db_v2",
+        "assets": [
+            {
+                "referenceId": "drop_ref_001",
+                "actionType": "drop",
+                "sourceVideoPath": "https://assets.example.com/source/drop.mp4",
+                "skeletonPath": str(skeleton_path),
+                "renderAssetPath": str(render_path),
+                "videoConfig": {"targetFps": 9.0},
+                "durationSec": 1.0,
+                "numFrames": 9,
+                "numJoints": 33,
+            }
+        ],
+    }
+    args = argparse.Namespace(
+        cf_backend_dir=str(tmp_path),
+        cf_target="remote",
+        cf_env="staging",
+        d1_database="",
+        r2_bucket="",
+        r2_prefix="refs",
+        source_video_r2_prefix="source-videos",
+        asset_base_url="",
+        title_template="{reference_id}",
+        skeleton_version="sam3db_v1",
+        priority_score=100,
+        is_active=1,
+        skip_source_video_upload=True,
+    )
+
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> str:
+        commands.append(command)
+        assert cwd == tmp_path
+        if (
+            len(command) >= 4
+            and command[:4] == ["npx", "wrangler", "d1", "execute"]
+            and "--json" in command
+            and "PRAGMA table_info(technique_reference_assets);" in command
+        ):
+            return json.dumps([{"results": [{"name": "id"}, {"name": "render_asset_url"}]}])
+        return ""
+
+    monkeypatch.setattr(script, "_run_command", fake_run)
+
+    summary = script._publish_assets(args, metadata)
+
+    assert summary["uploadFileCount"] == 2
+    assert summary["sourceVideoUploadCount"] == 0
+
+    r2_put_commands = [
+        command
+        for command in commands
+        if len(command) >= 5 and command[:5] == ["npx", "wrangler", "r2", "object", "put"]
+    ]
+    assert len(r2_put_commands) == 2
+
+    upsert_command = next(
+        command
+        for command in commands
+        if len(command) >= 4
+        and command[:4] == ["npx", "wrangler", "d1", "execute"]
+        and "--json" not in command
+        and any("INSERT INTO technique_reference_assets" in token for token in command)
+    )
+    upsert_sql = next(token for token in upsert_command if "INSERT INTO technique_reference_assets" in token)
+    assert "https://assets.example.com/source/drop.mp4" in upsert_sql
 
 
 def test_build_wrangler_scope_flags_local() -> None:

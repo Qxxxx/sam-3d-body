@@ -137,6 +137,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="R2 object key prefix for uploaded assets.",
     )
     parser.add_argument(
+        "--source-video-r2-prefix",
+        default="technique/reference-assets/source-videos",
+        help="R2 object key prefix for uploaded source videos.",
+    )
+    parser.add_argument(
         "--asset-base-url",
         default="",
         help=(
@@ -161,6 +166,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1,
         choices=(0, 1),
         help="is_active value for inserted reference assets.",
+    )
+    parser.add_argument(
+        "--skip-source-video-upload",
+        action="store_true",
+        help=(
+            "Do not upload the source reference video during --publish. "
+            "When set, source_video_url keeps the metadata sourceVideoPath value."
+        ),
     )
 
     return parser.parse_args(argv)
@@ -373,6 +386,57 @@ def _render_title(*, template: str, action_type: str, reference_id: str) -> str:
     return cleaned
 
 
+def _resolve_source_video_url(
+    *,
+    args: argparse.Namespace,
+    cf_backend_dir: Path,
+    r2_bucket: str,
+    action_type: str,
+    reference_id: str,
+    raw_source_video_path: str,
+) -> tuple[str | None, str | None]:
+    source_video_path_text = raw_source_video_path.strip()
+    if not source_video_path_text:
+        return None, None
+    if args.skip_source_video_upload:
+        return source_video_path_text, None
+
+    source_video_path = Path(source_video_path_text).expanduser()
+    if not source_video_path.exists():
+        return source_video_path_text, None
+    if not source_video_path.is_file():
+        raise ValueError(f"Source video path is not a file: {source_video_path}")
+
+    object_key = _build_object_key(
+        prefix=args.source_video_r2_prefix,
+        action_type=action_type,
+        reference_id=reference_id,
+        filename=source_video_path.name,
+    )
+    _run_command(
+        [
+            "npx",
+            "wrangler",
+            "r2",
+            "object",
+            "put",
+            f"{r2_bucket}/{object_key}",
+            "--file",
+            str(source_video_path.resolve()),
+            *_build_wrangler_scope_flags(args),
+        ],
+        cwd=cf_backend_dir,
+    )
+    return (
+        _build_asset_url(
+            bucket=r2_bucket,
+            object_key=object_key,
+            asset_base_url=args.asset_base_url,
+        ),
+        object_key,
+    )
+
+
 def _fetch_table_columns(
     *,
     args: argparse.Namespace,
@@ -494,6 +558,7 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
 
     uploaded_file_count = 0
     published_asset_ids: list[str] = []
+    source_video_upload_count = 0
     now_ms = int(time.time() * 1000)
 
     for raw_asset in assets:
@@ -573,7 +638,17 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
                 asset_base_url=args.asset_base_url,
             )
 
-        source_video_url = str(raw_asset.get("sourceVideoPath") or "").strip() or None
+        source_video_url, source_video_object_key = _resolve_source_video_url(
+            args=args,
+            cf_backend_dir=cf_backend_dir,
+            r2_bucket=r2_bucket,
+            action_type=action_type,
+            reference_id=reference_id,
+            raw_source_video_path=str(raw_asset.get("sourceVideoPath") or ""),
+        )
+        if source_video_object_key is not None:
+            uploaded_file_count += 1
+            source_video_upload_count += 1
         row_id = f"{_sanitize_segment(action_type)}_{_sanitize_segment(reference_id)}"
         title = _render_title(
             template=args.title_template,
@@ -594,6 +669,7 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
             "uploadedObjectKeys": {
                 "skeleton": skeleton_object_key,
                 "render": render_object_key,
+                "sourceVideo": source_video_object_key,
             },
         }
         _upsert_reference_asset_row(
@@ -637,6 +713,7 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
         "r2Bucket": r2_bucket,
         "assetBaseUrl": args.asset_base_url.strip() or None,
         "uploadFileCount": uploaded_file_count,
+        "sourceVideoUploadCount": source_video_upload_count,
         "upsertedAssetCount": len(published_asset_ids),
         "upsertedAssetIds": published_asset_ids,
         "renderAssetColumnDetected": include_render_asset_url,
