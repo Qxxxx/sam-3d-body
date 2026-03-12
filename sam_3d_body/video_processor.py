@@ -5,7 +5,9 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from socket import timeout as SocketTimeout
 from typing import TYPE_CHECKING, Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
@@ -167,6 +169,28 @@ def _is_remote_video_path(video_path: str) -> bool:
     return parsed.scheme in _REMOTE_VIDEO_SCHEMES and bool(parsed.netloc)
 
 
+def _classify_remote_video_fetch_error(raw_path: str, exc: Exception) -> Exception:
+    if isinstance(exc, HTTPError):
+        if exc.code == 404:
+            return FileNotFoundError(f"Video not found: {raw_path}")
+        if exc.code in {408, 504}:
+            return TimeoutError(f"Timed out fetching video: {raw_path} (HTTP {exc.code})")
+        return ConnectionError(
+            f"Failed to fetch video: {raw_path} (HTTP {exc.code})"
+        )
+
+    if isinstance(exc, URLError):
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, SocketTimeout)):
+            return TimeoutError(f"Timed out fetching video: {raw_path}")
+        return ConnectionError(f"Failed to fetch video: {raw_path} ({reason})")
+
+    if isinstance(exc, (TimeoutError, SocketTimeout)):
+        return TimeoutError(f"Timed out fetching video: {raw_path}")
+
+    return ConnectionError(f"Failed to fetch video: {raw_path} ({exc})")
+
+
 @contextmanager
 def _resolve_video_file(video_path: str | Path):
     raw_path = str(video_path)
@@ -187,7 +211,7 @@ def _resolve_video_file(video_path: str | Path):
             yield temp_path
             return
         except Exception as exc:
-            raise FileNotFoundError(f"Video not found: {raw_path}") from exc
+            raise _classify_remote_video_fetch_error(raw_path, exc) from exc
         finally:
             temp_path.unlink(missing_ok=True)
 

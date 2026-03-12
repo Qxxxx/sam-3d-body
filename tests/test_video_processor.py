@@ -3,9 +3,11 @@ from __future__ import annotations
 import io
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 import cv2
 import numpy as np
+import pytest
 
 from sam_3d_body.video_processor import (
     VideoExtractionConfig,
@@ -157,6 +159,25 @@ def test_extract_skeleton_sequence_supports_http_video_path(
 
     assert sequence.num_frames == 3
     assert sequence.num_joints == 4
+
+
+def test_extract_skeleton_sequence_surfaces_remote_http_errors(monkeypatch: Any) -> None:
+    def _fake_urlopen(url: str, timeout: int = 30):
+        assert url == "https://example.com/forbidden.mp4"
+        assert timeout == 30
+        raise HTTPError(url, 403, "Forbidden", hdrs=None, fp=None)
+
+    monkeypatch.setattr("sam_3d_body.video_processor.urlopen", _fake_urlopen)
+
+    with pytest.raises(ConnectionError, match="HTTP 403"):
+        extract_skeleton_sequence_from_video(
+            video_path="https://example.com/forbidden.mp4",
+            estimator=_SinglePersonEstimator(),  # type: ignore[arg-type]
+            config=VideoExtractionConfig(
+                target_fps=5.0,
+                max_frames=3,
+            ),
+        )
 
 
 def test_extract_skeleton_sequence_returns_camera_metadata(tmp_path: Path) -> None:

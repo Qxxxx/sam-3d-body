@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from api.config import ApiSettings
@@ -140,6 +141,49 @@ def test_infer_video_endpoint_returns_asset_manifest_and_local_files(tmp_path: P
     render_response = client.get(payload["files"]["render"]["fetchUrl"])
     assert render_response.status_code == 200
     assert len(render_response.content) > 0
+
+
+def test_infer_video_endpoint_maps_remote_fetch_failures_to_bad_gateway(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    app = create_app(
+        estimator=_DummyEstimator(),
+        settings=ApiSettings(
+            checkpoint_path="/tmp/model.ckpt",
+            mhr_path="/tmp/mhr_model.pt",
+            device="cpu",
+            fov_name="moge2",
+            fov_path="",
+            artifact_root=str(artifact_root),
+        ),
+    )
+    infer_video_endpoint = _route_endpoint(app, "/infer/video")
+    request = VideoInferenceRequest.model_validate(
+        {
+            "videoPath": "https://example.com/forbidden.mp4",
+            "assetConfig": {
+                "assetId": "user_bundle",
+                "actionType": "smash",
+                "handedness": "right",
+            },
+            "storage": {
+                "mode": "local",
+                "prefix": "unit-tests",
+            },
+        }
+    )
+
+    def _fake_urlopen(_url: str, timeout: int = 30):
+        raise ConnectionError(f"Failed to fetch video: https://example.com/forbidden.mp4 (HTTP 403)")
+
+    monkeypatch.setattr("sam_3d_body.video_processor.urlopen", _fake_urlopen)
+
+    with pytest.raises(HTTPException) as exc_info:
+        infer_video_endpoint(request)
+
+    assert exc_info.value.status_code == 502
+    assert "Failed to fetch video" in str(exc_info.value.detail)
 
 
 def test_video_inference_request_uses_selection_bbox() -> None:

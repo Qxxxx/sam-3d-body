@@ -80,6 +80,10 @@ def _map_service_exception(exc: Exception) -> HTTPException:
         return exc
     if isinstance(exc, FileNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, TimeoutError):
+        return HTTPException(status_code=504, detail=str(exc))
+    if isinstance(exc, ConnectionError):
+        return HTTPException(status_code=502, detail=str(exc))
     if isinstance(exc, ValueError):
         return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=500, detail=f"Internal server error: {exc}")

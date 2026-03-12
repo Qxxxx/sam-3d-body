@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import io
+from urllib.error import HTTPError
+
 import numpy as np
+import pytest
 
 from sam_3d_body.technique_alignment import (
     AlignmentConfig,
@@ -156,3 +159,15 @@ def test_load_skeleton_sequence_npz_supports_remote_url(tmp_path, monkeypatch) -
     assert np.allclose(sequence.keypoints_3d, expected_keypoints)
     assert np.allclose(sequence.timestamps, expected_timestamps)
     assert sequence.joint_names == ("hip", "wrist")
+
+
+def test_load_skeleton_sequence_npz_surfaces_remote_http_errors(monkeypatch) -> None:
+    def _fake_urlopen(url: str, timeout: int = 30):
+        assert url == "https://example.com/forbidden.npz"
+        assert timeout == 30
+        raise HTTPError(url, 403, "Forbidden", hdrs=None, fp=None)
+
+    monkeypatch.setattr("sam_3d_body.technique_alignment.urlopen", _fake_urlopen)
+
+    with pytest.raises(ConnectionError, match="HTTP 403"):
+        load_skeleton_sequence_npz("https://example.com/forbidden.npz")

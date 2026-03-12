@@ -6,7 +6,9 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from socket import timeout as SocketTimeout
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
@@ -253,6 +255,32 @@ def _is_remote_npz_path(npz_path: str) -> bool:
     return parsed.scheme in _REMOTE_NPZ_SCHEMES and bool(parsed.netloc)
 
 
+def _classify_remote_npz_fetch_error(raw_path: str, exc: Exception) -> Exception:
+    if isinstance(exc, HTTPError):
+        if exc.code == 404:
+            return FileNotFoundError(f"Skeleton npz not found: {raw_path}")
+        if exc.code in {408, 504}:
+            return TimeoutError(
+                f"Timed out fetching skeleton npz: {raw_path} (HTTP {exc.code})"
+            )
+        return ConnectionError(
+            f"Failed to fetch skeleton npz: {raw_path} (HTTP {exc.code})"
+        )
+
+    if isinstance(exc, URLError):
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, SocketTimeout)):
+            return TimeoutError(f"Timed out fetching skeleton npz: {raw_path}")
+        return ConnectionError(
+            f"Failed to fetch skeleton npz: {raw_path} ({reason})"
+        )
+
+    if isinstance(exc, (TimeoutError, SocketTimeout)):
+        return TimeoutError(f"Timed out fetching skeleton npz: {raw_path}")
+
+    return ConnectionError(f"Failed to fetch skeleton npz: {raw_path} ({exc})")
+
+
 @contextmanager
 def _resolve_npz_file(npz_path: str | Path):
     raw_path = str(npz_path)
@@ -273,7 +301,7 @@ def _resolve_npz_file(npz_path: str | Path):
             yield temp_path
             return
         except Exception as exc:
-            raise FileNotFoundError(f"Skeleton npz not found: {raw_path}") from exc
+            raise _classify_remote_npz_fetch_error(raw_path, exc) from exc
         finally:
             temp_path.unlink(missing_ok=True)
 
