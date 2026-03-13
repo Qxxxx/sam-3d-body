@@ -16,6 +16,11 @@ from sam_3d_body.reference_assets import (
 )
 from sam_3d_body.video_processor import VideoExtractionConfig
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+GOLDEN_IMG_1966_RIGHT_VIDEO = (
+    REPO_ROOT / "duolian" / "duolian" / "Resources" / "Videos" / "IMG_1966_right.MOV"
+)
+
 
 def _write_dummy_video(path: Path, fps: float, num_frames: int) -> None:
     width, height = 120, 80
@@ -269,6 +274,37 @@ def test_build_reference_assets_writes_npz_and_metadata(tmp_path: Path) -> None:
         assert "horizontal_fov_deg" in render_data
         assert "camera_source" in render_data
         assert render_data["vertices_3d"].shape[2] == 3
+
+
+@pytest.mark.skipif(
+    not GOLDEN_IMG_1966_RIGHT_VIDEO.exists(),
+    reason="Golden IMG_1966_right.MOV fixture not available",
+)
+def test_build_reference_asset_bundle_preserves_all_decodable_frames_for_img_1966_right(
+    tmp_path: Path,
+) -> None:
+    entry = ReferenceVideoEntry(
+        video_path=GOLDEN_IMG_1966_RIGHT_VIDEO,
+        action_type="smash",
+        reference_id="img_1966_right_golden",
+        handedness="right",
+        camera_view="side",
+        video_config=VideoExtractionConfig(target_fps=30.0, max_frames=240),
+    )
+
+    bundle = build_reference_assets(
+        [entry],
+        estimator=_DummyEstimator(),  # type: ignore[arg-type]
+        output_dir=tmp_path / "golden_out",
+        skeleton_version="test_v1",
+    )
+
+    asset = bundle["assets"][0]
+    assert asset["numFrames"] == 51
+    assert asset["frameIndices"] == list(range(0, 101, 2))
+    assert asset["videoConfig"]["targetFps"] == 30.0
+    assert asset["videoConfig"]["startTimeSec"] == 0.0
+    assert asset["videoConfig"]["endTimeSec"] is None
 
 def test_build_reference_assets_rejects_duplicate_reference_id(tmp_path: Path) -> None:
     video = tmp_path / "dup.mp4"
