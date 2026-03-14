@@ -5,6 +5,13 @@ Scope: everything under `sam-3d-body/`.
 This fork should stay easy to rebase on upstream. Prefer narrow changes that
 improve local harnessing without restructuring the model code.
 
+Branching and landing:
+
+- Land `sam-3d-body` changes directly on `custom/main`.
+- Do not open a separate `sam-3d-body` PR from this workspace for routine fork
+  maintenance; commit on `custom/main`, push it, then update the root
+  repository's submodule pointer.
+
 Project shape:
 
 - Python package in `sam_3d_body/`
