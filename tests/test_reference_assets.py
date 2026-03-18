@@ -282,7 +282,7 @@ def test_build_reference_assets_writes_npz_and_metadata(tmp_path: Path) -> None:
             camera_view="side",
             handedness="right",
             selection_point_px=(20.0, 20.0),
-            video_config=VideoExtractionConfig(target_fps=5.0, max_frames=3),
+            video_config=VideoExtractionConfig(target_fps=5.0),
         ),
         ReferenceVideoEntry(
             video_path=video2,
@@ -291,7 +291,7 @@ def test_build_reference_assets_writes_npz_and_metadata(tmp_path: Path) -> None:
             athlete_name="athlete_b",
             camera_view="back",
             handedness="left",
-            video_config=VideoExtractionConfig(target_fps=6.0, max_frames=4),
+            video_config=VideoExtractionConfig(target_fps=6.0),
             metadata={"source": "manual_pick"},
         ),
     ]
