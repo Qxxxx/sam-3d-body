@@ -31,6 +31,7 @@ class VideoExtractionConfig:
     bbox_thr: float = 0.5
     use_mask: bool = False
     inference_type: str = "body"
+    sample_every_frame: bool = False
 
 
 def _normalize_cam_intrinsics(value: Any) -> np.ndarray | None:
@@ -243,7 +244,11 @@ def extract_skeleton_sequence_from_video(
         source_fps = float(cap.get(cv2.CAP_PROP_FPS))
         if source_fps <= 0:
             source_fps = max(1.0, config.target_fps)
-        sample_every_n_frames = max(1, int(round(source_fps / max(config.target_fps, 1e-6))))
+        sample_every_n_frames = (
+            1
+            if config.sample_every_frame
+            else max(1, int(round(source_fps / max(config.target_fps, 1e-6))))
+        )
 
         start_frame = max(0, int(round(config.start_time_sec * source_fps)))
         end_frame = (

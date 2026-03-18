@@ -31,6 +31,51 @@ def _write_dummy_video(path: Path, fps: float = 10.0, num_frames: int = 8) -> No
         writer.release()
 
 
+def _write_phase_annotations(
+    path: Path,
+    *,
+    reference_id: str,
+    action_type: str,
+    final_frame: int,
+) -> None:
+    payload = {
+        "schemaVersion": "technique_reference_phases.v1",
+        "referenceId": reference_id,
+        "actionType": action_type,
+        "phaseAnnotations": [
+            {
+                "id": "preparatory_phase",
+                "name": "Preparatory Phase",
+                "description": "Load posture and prepare to swing.",
+                "startFrame": 0,
+                "endFrame": final_frame // 4,
+            },
+            {
+                "id": "backswing_phase",
+                "name": "Backswing Phase",
+                "description": "Draw the racket back.",
+                "startFrame": final_frame // 4 + 1,
+                "endFrame": final_frame // 2,
+            },
+            {
+                "id": "power_generation_phase",
+                "name": "Power Generation Phase",
+                "description": "Accelerate into the shuttle.",
+                "startFrame": final_frame // 2 + 1,
+                "endFrame": (final_frame * 3) // 4,
+            },
+            {
+                "id": "followthrough_phase",
+                "name": "Follow-through Phase",
+                "description": "Finish the swing and recover.",
+                "startFrame": (final_frame * 3) // 4 + 1,
+                "endFrame": final_frame,
+            },
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 class _DummyEstimator:
     def __init__(self) -> None:
         self.call_count = 0
@@ -175,6 +220,9 @@ def test_load_entry_defaults_reference_id_from_video_name(tmp_path: Path) -> Non
 
     assert entry.video_path == video_path
     assert entry.reference_id == "smash_pro_01"
+    assert entry.asset_role == "reference"
+    assert entry.video_config.sample_every_frame is True
+    assert entry.phase_annotations_file == tmp_path / "Smash Pro 01.phase.json"
     assert entry.selection_point_px is None
 
 
@@ -204,6 +252,12 @@ def test_main_builds_single_video_assets_and_summary(
 ) -> None:
     video_path = tmp_path / "Smash Pro 01.mp4"
     _write_dummy_video(video_path)
+    _write_phase_annotations(
+        tmp_path / "Smash Pro 01.phase.json",
+        reference_id="smash_ref_001",
+        action_type="smash",
+        final_frame=7,
+    )
     output_dir = tmp_path / "out_assets"
 
     monkeypatch.setattr(script, "_load_estimator", lambda _args: _DummyEstimator())
@@ -242,10 +296,12 @@ def test_main_builds_single_video_assets_and_summary(
     asset = metadata["assets"][0]
     assert asset["referenceId"] == "smash_ref_001"
     assert asset["actionType"] == "smash"
+    assert asset["videoConfig"]["sampleEveryFrame"] is True
     assert asset["athleteName"] == "athlete_a"
     assert asset["cameraView"] == "side"
     assert asset["handedness"] == "right"
     assert asset["selectionPointPx"] == [12.5, 24.0]
+    assert len(asset["phaseAnnotations"]) == 4
     assert Path(asset["skeletonPath"]).exists()
     assert Path(asset["renderAssetPath"]).exists()
 
@@ -277,6 +333,17 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
                 "durationSec": 1.2,
                 "numFrames": 12,
                 "numJoints": 33,
+                "sourceFps": 24.0,
+                "frameIndices": [0, 1, 2, 3],
+                "phaseAnnotations": [
+                    {
+                        "id": "preparatory_phase",
+                        "name": "Preparatory Phase",
+                        "description": "Load posture and prepare to swing.",
+                        "startFrame": 0,
+                        "endFrame": 1,
+                    }
+                ],
                 "renderAssetSchemaVersion": "technique_reference_render.v1",
                 "renderAssetFloatDtype": "float16",
                 "renderAssetFields": ["keypoints_3d"],
@@ -356,6 +423,9 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
     )
     assert "https://assets.example.com/refs-source/smash/smash_ref_001/source.mp4" in upsert_sql
     assert '"sourceVideo": "refs-source/smash/smash_ref_001/source.mp4"' in upsert_sql
+    assert '"sourceFps": 24.0' in upsert_sql
+    assert '"frameIndices": [0, 1, 2, 3]' in upsert_sql
+    assert '"phaseAnnotations": [{"id": "preparatory_phase"' in upsert_sql
 
 
 def test_publish_assets_skips_render_column_when_db_not_migrated(

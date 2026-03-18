@@ -41,6 +41,59 @@ def _write_dummy_video(path: Path, fps: float, num_frames: int) -> None:
         writer.release()
 
 
+def _write_phase_annotations(
+    path: Path,
+    *,
+    reference_id: str,
+    action_type: str,
+    final_frame: int,
+) -> None:
+    if final_frame < 3:
+        raise ValueError("final_frame must be >= 3")
+    phase_lengths = [
+        final_frame // 4,
+        final_frame // 2,
+        (final_frame * 3) // 4,
+        final_frame,
+    ]
+    payload = {
+        "schemaVersion": "technique_reference_phases.v1",
+        "referenceId": reference_id,
+        "actionType": action_type,
+        "phaseAnnotations": [
+            {
+                "id": "preparatory_phase",
+                "name": "Preparatory Phase",
+                "description": "Load posture and prepare to swing.",
+                "startFrame": 0,
+                "endFrame": phase_lengths[0],
+            },
+            {
+                "id": "backswing_phase",
+                "name": "Backswing Phase",
+                "description": "Draw the racket back.",
+                "startFrame": phase_lengths[0] + 1,
+                "endFrame": phase_lengths[1],
+            },
+            {
+                "id": "power_generation_phase",
+                "name": "Power Generation Phase",
+                "description": "Accelerate into the shuttle.",
+                "startFrame": phase_lengths[1] + 1,
+                "endFrame": phase_lengths[2],
+            },
+            {
+                "id": "followthrough_phase",
+                "name": "Follow-through Phase",
+                "description": "Finish the swing and recover.",
+                "startFrame": phase_lengths[2] + 1,
+                "endFrame": phase_lengths[3],
+            },
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 class _DummyEstimator:
     def __init__(self) -> None:
         self.call_count = 0
@@ -155,12 +208,14 @@ def test_load_reference_manifest_applies_defaults(tmp_path: Path) -> None:
     entry = entries[0]
     assert entry.reference_id == "smash_pro_01"
     assert entry.action_type == "smash"
+    assert entry.asset_role == "reference"
     assert entry.athlete_name == "pro_player"
     assert entry.camera_view == "back"
     assert entry.handedness == "right"
     assert entry.selection_point_px == (123.0, 45.0)
     assert entry.video_config.target_fps == 15.0
     assert entry.video_config.max_frames == 200
+    assert entry.video_config.sample_every_frame is True
     assert entry.metadata["source"] == "youtube"
 
 
@@ -205,6 +260,18 @@ def test_build_reference_assets_writes_npz_and_metadata(tmp_path: Path) -> None:
     video2 = tmp_path / "smash_2.mp4"
     _write_dummy_video(video1, fps=10.0, num_frames=8)
     _write_dummy_video(video2, fps=12.0, num_frames=12)
+    _write_phase_annotations(
+        tmp_path / "smash_1.phase.json",
+        reference_id="smash_pro_001",
+        action_type="smash",
+        final_frame=7,
+    )
+    _write_phase_annotations(
+        tmp_path / "smash_2.phase.json",
+        reference_id="smash_pro_002",
+        action_type="smash",
+        final_frame=11,
+    )
 
     entries = [
         ReferenceVideoEntry(
@@ -258,6 +325,7 @@ def test_build_reference_assets_writes_npz_and_metadata(tmp_path: Path) -> None:
         assert "timestamps" in npz_data
         assert npz_data["keypoints_3d"].shape[2] == 3
         assert asset["cameraSource"] == "moge2"
+        assert len(asset["phaseAnnotations"]) == 4
         assert asset["horizontalFovDegCount"] == int(npz_data["timestamps"].shape[0])
         assert asset["horizontalFovDegRange"] is not None
         assert asset["renderAssetPath"] is not None
@@ -283,10 +351,18 @@ def test_build_reference_assets_writes_npz_and_metadata(tmp_path: Path) -> None:
 def test_build_reference_asset_bundle_preserves_all_decodable_frames_for_img_1966_right(
     tmp_path: Path,
 ) -> None:
+    phase_file = tmp_path / "img_1966_right_golden.phase.json"
+    _write_phase_annotations(
+        phase_file,
+        reference_id="img_1966_right_golden",
+        action_type="smash",
+        final_frame=100,
+    )
     entry = ReferenceVideoEntry(
         video_path=GOLDEN_IMG_1966_RIGHT_VIDEO,
         action_type="smash",
         reference_id="img_1966_right_golden",
+        phase_annotations_file=phase_file,
         handedness="right",
         camera_view="side",
         video_config=VideoExtractionConfig(target_fps=30.0, max_frames=240),
@@ -300,11 +376,59 @@ def test_build_reference_asset_bundle_preserves_all_decodable_frames_for_img_196
     )
 
     asset = bundle["assets"][0]
-    assert asset["numFrames"] == 51
-    assert asset["frameIndices"] == list(range(0, 101, 2))
+    assert asset["numFrames"] == 101
+    assert asset["frameIndices"] == list(range(0, 101))
     assert asset["videoConfig"]["targetFps"] == 30.0
     assert asset["videoConfig"]["startTimeSec"] == 0.0
     assert asset["videoConfig"]["endTimeSec"] is None
+    assert asset["videoConfig"]["sampleEveryFrame"] is True
+
+
+def test_build_reference_assets_requires_phase_annotations_for_reference_assets(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "smash_missing_phase.mp4"
+    _write_dummy_video(video, fps=10.0, num_frames=8)
+    entry = ReferenceVideoEntry(
+        video_path=video,
+        action_type="smash",
+        reference_id="smash_missing_phase",
+    )
+
+    with pytest.raises(FileNotFoundError, match="Phase annotations file not found"):
+        build_reference_assets(
+            [entry],
+            estimator=_DummyEstimator(),  # type: ignore[arg-type]
+            output_dir=tmp_path / "out_assets",
+        )
+
+
+def test_build_reference_assets_rejects_truncated_phase_annotations(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "smash_truncated.mp4"
+    _write_dummy_video(video, fps=10.0, num_frames=8)
+    phase_file = tmp_path / "smash_truncated.phase.json"
+    _write_phase_annotations(
+        phase_file,
+        reference_id="smash_truncated",
+        action_type="smash",
+        final_frame=7,
+    )
+    entry = ReferenceVideoEntry(
+        video_path=video,
+        action_type="smash",
+        reference_id="smash_truncated",
+        phase_annotations_file=phase_file,
+        video_config=VideoExtractionConfig(max_frames=4),
+    )
+
+    with pytest.raises(ValueError, match="extends past extracted frames"):
+        build_reference_assets(
+            [entry],
+            estimator=_DummyEstimator(),  # type: ignore[arg-type]
+            output_dir=tmp_path / "out_assets",
+        )
 
 def test_build_reference_assets_rejects_duplicate_reference_id(tmp_path: Path) -> None:
     video = tmp_path / "dup.mp4"

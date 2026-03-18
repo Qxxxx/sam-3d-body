@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
@@ -29,6 +29,13 @@ if TYPE_CHECKING:
 DEFAULT_METADATA_FILENAME = "metadata.json"
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 RENDER_ASSET_SCHEMA_VERSION = "technique_reference_render.v1"
+REFERENCE_PHASES_SCHEMA_VERSION = "technique_reference_phases.v1"
+REFERENCE_PHASE_IDS = (
+    "preparatory_phase",
+    "backswing_phase",
+    "power_generation_phase",
+    "followthrough_phase",
+)
 
 
 @dataclass
@@ -38,6 +45,24 @@ class ReferenceExtractionResult:
     frame_indices: np.ndarray
     source_fps: float
     image_size_hw: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class ReferencePhaseAnnotation:
+    id: str
+    name: str
+    description: str
+    start_frame: int
+    end_frame: int
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "startFrame": self.start_frame,
+            "endFrame": self.end_frame,
+        }
 
 
 @dataclass(frozen=True)
@@ -70,16 +95,37 @@ def _derive_reference_id(video_path: str | Path) -> str:
     return _slugify(Path(raw_path).stem)
 
 
+def _default_phase_annotations_path(video_path: str | Path) -> Path | None:
+    raw_path = str(video_path).strip()
+    if _is_remote_video_path(raw_path):
+        return None
+    path = Path(raw_path)
+    return path.with_name(f"{path.stem}.phase.json")
+
+
+def _normalize_optional_path(path_value: str | Path | None) -> str | Path | None:
+    if path_value is None:
+        return None
+    raw_path = str(path_value).strip()
+    if not raw_path:
+        return None
+    if _is_remote_video_path(raw_path):
+        return raw_path
+    return Path(raw_path)
+
+
 @dataclass(frozen=True)
 class ReferenceVideoEntry:
     video_path: str | Path
     action_type: str
     reference_id: str | None = None
+    asset_role: str = "reference"
     athlete_name: str | None = None
     camera_view: str | None = None
     handedness: str | None = None
     selection_bbox_xyxy: tuple[float, float, float, float] | None = None
     selection_point_px: tuple[float, float] | None = None
+    phase_annotations_file: str | Path | None = None
     video_config: VideoExtractionConfig = field(default_factory=VideoExtractionConfig)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -99,6 +145,22 @@ class ReferenceVideoEntry:
         else:
             object.__setattr__(self, "reference_id", _slugify(self.reference_id))
 
+        cleaned_asset_role = self.asset_role.strip().lower()
+        if cleaned_asset_role not in {"reference", "user"}:
+            raise ValueError("asset_role must be one of: reference, user.")
+        object.__setattr__(self, "asset_role", cleaned_asset_role)
+
+        normalized_phase_annotations_file = _normalize_optional_path(
+            self.phase_annotations_file
+        )
+        if normalized_phase_annotations_file is None and cleaned_asset_role == "reference":
+            normalized_phase_annotations_file = _default_phase_annotations_path(self.video_path)
+        object.__setattr__(
+            self,
+            "phase_annotations_file",
+            normalized_phase_annotations_file,
+        )
+
         if self.selection_bbox_xyxy is not None:
             bbox = _validate_selection_bbox_xyxy(self.selection_bbox_xyxy)
             object.__setattr__(
@@ -109,6 +171,13 @@ class ReferenceVideoEntry:
 
         if self.selection_bbox_xyxy is not None and self.selection_point_px is not None:
             raise ValueError("selection_bbox_xyxy and selection_point_px are mutually exclusive.")
+
+        if cleaned_asset_role == "reference" and not self.video_config.sample_every_frame:
+            object.__setattr__(
+                self,
+                "video_config",
+                replace(self.video_config, sample_every_frame=True),
+            )
 
 
 def _parse_video_config(
@@ -125,6 +194,7 @@ def _parse_video_config(
             bbox_thr=base.bbox_thr,
             use_mask=base.use_mask,
             inference_type=base.inference_type,
+            sample_every_frame=base.sample_every_frame,
         )
 
     return VideoExtractionConfig(
@@ -139,6 +209,9 @@ def _parse_video_config(
         bbox_thr=float(raw_config.get("bboxThr", base.bbox_thr)),
         use_mask=bool(raw_config.get("useMask", base.use_mask)),
         inference_type=str(raw_config.get("inferenceType", base.inference_type)),
+        sample_every_frame=bool(
+            raw_config.get("sampleEveryFrame", base.sample_every_frame)
+        ),
     )
 
 
@@ -167,6 +240,7 @@ def discover_reference_videos(
             ReferenceVideoEntry(
                 video_path=path,
                 action_type=action_type,
+                asset_role="reference",
                 athlete_name=athlete_name,
                 camera_view=camera_view,
                 handedness=handedness,
@@ -249,12 +323,14 @@ def load_reference_manifest(
             ReferenceVideoEntry(
                 video_path=video_path_raw,
                 action_type=action_type,
+                asset_role=str(raw.get("assetRole") or "reference"),
                 reference_id=raw.get("referenceId"),
                 athlete_name=raw.get("athleteName", default_athlete_name),
                 camera_view=raw.get("cameraView", default_camera_view),
                 handedness=raw.get("handedness", default_handedness),
                 selection_bbox_xyxy=selection_bbox_xyxy,
                 selection_point_px=selection_point_px,
+                phase_annotations_file=raw.get("phaseAnnotationsFile"),
                 video_config=_parse_video_config(
                     raw.get("videoConfig"),
                     default=default_video_config,
@@ -285,6 +361,136 @@ def save_skeleton_sequence_npz(
     np.savez(path, **payload)
 
 
+def _load_phase_annotations(
+    entry: ReferenceVideoEntry,
+) -> list[ReferencePhaseAnnotation]:
+    if entry.asset_role != "reference":
+        return []
+    if entry.phase_annotations_file is None:
+        raise ValueError(
+            f"Reference asset '{entry.reference_id}' requires a phase annotations file."
+        )
+
+    phase_file = entry.phase_annotations_file
+    if isinstance(phase_file, str) and _is_remote_video_path(phase_file):
+        raise ValueError("phase_annotations_file must point to a local JSON file.")
+
+    phase_path = Path(phase_file).expanduser()
+    if not phase_path.exists():
+        raise FileNotFoundError(
+            f"Phase annotations file not found for '{entry.reference_id}': {phase_path}"
+        )
+
+    with phase_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError("Phase annotations file must contain a JSON object.")
+
+    schema_version = str(payload.get("schemaVersion") or "").strip()
+    if schema_version != REFERENCE_PHASES_SCHEMA_VERSION:
+        raise ValueError(
+            f"Phase annotations schemaVersion must be {REFERENCE_PHASES_SCHEMA_VERSION}."
+        )
+
+    reference_id = _slugify(str(payload.get("referenceId") or ""))
+    if reference_id != entry.reference_id:
+        raise ValueError(
+            f"Phase annotations referenceId '{reference_id}' does not match '{entry.reference_id}'."
+        )
+
+    action_type = str(payload.get("actionType") or "").strip()
+    if action_type != entry.action_type:
+        raise ValueError(
+            f"Phase annotations actionType '{action_type}' does not match '{entry.action_type}'."
+        )
+
+    raw_annotations = payload.get("phaseAnnotations")
+    if not isinstance(raw_annotations, list):
+        raise ValueError("Phase annotations file must include a phaseAnnotations array.")
+    if len(raw_annotations) != len(REFERENCE_PHASE_IDS):
+        raise ValueError(
+            f"phaseAnnotations must contain exactly {len(REFERENCE_PHASE_IDS)} entries."
+        )
+
+    annotations: list[ReferencePhaseAnnotation] = []
+    previous_end_frame: int | None = None
+    for index, expected_id in enumerate(REFERENCE_PHASE_IDS):
+        raw_annotation = raw_annotations[index]
+        if not isinstance(raw_annotation, dict):
+            raise ValueError(f"phaseAnnotations[{index}] must be an object.")
+
+        phase_id = str(raw_annotation.get("id") or "").strip()
+        if phase_id != expected_id:
+            raise ValueError(
+                f"phaseAnnotations[{index}].id must be '{expected_id}', got '{phase_id}'."
+            )
+
+        name = str(raw_annotation.get("name") or "").strip()
+        description = str(raw_annotation.get("description") or "").strip()
+        if not name:
+            raise ValueError(f"phaseAnnotations[{index}].name must not be empty.")
+        if not description:
+            raise ValueError(f"phaseAnnotations[{index}].description must not be empty.")
+
+        start_frame = raw_annotation.get("startFrame")
+        end_frame = raw_annotation.get("endFrame")
+        if not isinstance(start_frame, int) or not isinstance(end_frame, int):
+            raise ValueError(
+                f"phaseAnnotations[{index}] startFrame/endFrame must be integers."
+            )
+        if start_frame < 0 or end_frame < start_frame:
+            raise ValueError(
+                f"phaseAnnotations[{index}] must satisfy 0 <= startFrame <= endFrame."
+            )
+        if previous_end_frame is not None and start_frame <= previous_end_frame:
+            raise ValueError(
+                "phaseAnnotations must be strictly ordered and non-overlapping."
+            )
+
+        annotations.append(
+            ReferencePhaseAnnotation(
+                id=phase_id,
+                name=name,
+                description=description,
+                start_frame=start_frame,
+                end_frame=end_frame,
+            )
+        )
+        previous_end_frame = end_frame
+
+    return annotations
+
+
+def _validate_phase_annotations_against_extraction(
+    annotations: list[ReferencePhaseAnnotation],
+    extraction: ReferenceExtractionResult,
+) -> None:
+    if not annotations:
+        return
+    frame_indices = {int(frame_index) for frame_index in extraction.frame_indices.tolist()}
+    if not frame_indices:
+        raise ValueError("Reference extraction returned no frame indices.")
+
+    max_frame_index = max(frame_indices)
+    for annotation in annotations:
+        if annotation.start_frame > max_frame_index or annotation.end_frame > max_frame_index:
+            raise ValueError(
+                f"Phase annotation '{annotation.id}' extends past extracted frames "
+                f"(max extracted frame={max_frame_index})."
+            )
+        if annotation.start_frame not in frame_indices:
+            raise ValueError(
+                f"Phase annotation '{annotation.id}' startFrame {annotation.start_frame} "
+                "does not exactly match extracted frameIndices."
+            )
+        if annotation.end_frame not in frame_indices:
+            raise ValueError(
+                f"Phase annotation '{annotation.id}' endFrame {annotation.end_frame} "
+                "does not exactly match extracted frameIndices."
+            )
+
+
 def _extract_reference_result(
     *,
     entry: ReferenceVideoEntry,
@@ -303,8 +509,10 @@ def _extract_reference_result(
         source_fps = float(cap.get(cv2.CAP_PROP_FPS))
         if source_fps <= 0:
             source_fps = max(1.0, entry.video_config.target_fps)
-        sample_every_n_frames = max(
-            1, int(round(source_fps / max(entry.video_config.target_fps, 1e-6)))
+        sample_every_n_frames = (
+            1
+            if entry.video_config.sample_every_frame
+            else max(1, int(round(source_fps / max(entry.video_config.target_fps, 1e-6))))
         )
 
         start_frame = max(0, int(round(entry.video_config.start_time_sec * source_fps)))
@@ -575,10 +783,12 @@ def _build_asset_metadata(
     output_npz: Path,
     extraction: ReferenceExtractionResult,
     render_asset: dict[str, Any],
+    phase_annotations: list[ReferencePhaseAnnotation],
 ) -> dict[str, Any]:
     return {
         "referenceId": entry.reference_id,
         "actionType": entry.action_type,
+        "assetRole": entry.asset_role,
         "athleteName": entry.athlete_name,
         "cameraView": entry.camera_view,
         "handedness": entry.handedness,
@@ -614,6 +824,7 @@ def _build_asset_metadata(
             "bboxThr": entry.video_config.bbox_thr,
             "useMask": entry.video_config.use_mask,
             "inferenceType": entry.video_config.inference_type,
+            "sampleEveryFrame": entry.video_config.sample_every_frame,
         },
         "numFrames": sequence.num_frames,
         "numJoints": sequence.num_joints,
@@ -622,6 +833,7 @@ def _build_asset_metadata(
         "imageSizeHw": [extraction.image_size_hw[0], extraction.image_size_hw[1]],
         "frameIndices": extraction.frame_indices.tolist(),
         "jointNames": list(sequence.joint_names) if sequence.joint_names is not None else None,
+        "phaseAnnotations": [item.to_metadata() for item in phase_annotations],
         "metadata": entry.metadata,
     }
 
@@ -696,6 +908,8 @@ def build_reference_asset_bundle(
         entry=entry,
         estimator=estimator,
     )
+    phase_annotations = _load_phase_annotations(entry)
+    _validate_phase_annotations_against_extraction(phase_annotations, extraction)
     sequence = extraction.sequence
     save_skeleton_sequence_npz(sequence, output_npz)
     render_asset = save_render_asset_npz(
@@ -705,7 +919,14 @@ def build_reference_asset_bundle(
         float_dtype=render_asset_float_dtype,
         include_masks=render_include_masks,
     )
-    asset_metadata = _build_asset_metadata(entry, sequence, output_npz, extraction, render_asset)
+    asset_metadata = _build_asset_metadata(
+        entry,
+        sequence,
+        output_npz,
+        extraction,
+        render_asset,
+        phase_annotations,
+    )
     return ReferenceAssetBundle(
         entry=entry,
         sequence=sequence,

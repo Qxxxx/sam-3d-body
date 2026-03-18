@@ -49,6 +49,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--camera-view", default="", help="Optional camera view.")
     parser.add_argument("--handedness", default="", help="Optional handedness.")
     parser.add_argument(
+        "--phase-annotations-file",
+        default="",
+        help=(
+            "Optional path to the reference phase annotations sidecar JSON. "
+            "Defaults to <video stem>.phase.json next to --video-path."
+        ),
+    )
+    parser.add_argument(
         "--selection-point-px",
         nargs=2,
         metavar=("X", "Y"),
@@ -193,6 +201,7 @@ def _build_default_video_config(args: argparse.Namespace) -> VideoExtractionConf
         bbox_thr=args.bbox_thr,
         use_mask=args.use_mask,
         inference_type=args.inference_type,
+        sample_every_frame=True,
     )
 
 
@@ -213,10 +222,12 @@ def _load_entry(args: argparse.Namespace) -> ReferenceVideoEntry:
         video_path=video_path,
         action_type=args.action_type,
         reference_id=_normalize_optional_str(args.reference_id),
+        asset_role="reference",
         athlete_name=_normalize_optional_str(args.athlete_name),
         camera_view=_normalize_optional_str(args.camera_view),
         handedness=_normalize_optional_str(args.handedness),
         selection_point_px=selection_point_px,
+        phase_annotations_file=_normalize_optional_str(args.phase_annotations_file),
         video_config=default_video_config,
     )
 
@@ -659,6 +670,9 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
             "sourceVideoPath": raw_asset.get("sourceVideoPath"),
             "selectionPointPx": raw_asset.get("selectionPointPx"),
             "videoConfig": raw_asset.get("videoConfig"),
+            "sourceFps": raw_asset.get("sourceFps"),
+            "frameIndices": raw_asset.get("frameIndices"),
+            "phaseAnnotations": raw_asset.get("phaseAnnotations"),
             "cameraSource": raw_asset.get("cameraSource"),
             "horizontalFovDegCount": raw_asset.get("horizontalFovDegCount"),
             "horizontalFovDegRange": raw_asset.get("horizontalFovDegRange"),

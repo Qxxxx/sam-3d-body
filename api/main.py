@@ -160,10 +160,12 @@ def _build_asset_entry(payload: VideoInferenceRequest) -> ReferenceVideoEntry:
         video_path=payload.video_path,
         action_type=(payload.asset_config.action_type or "unknown"),
         reference_id=payload.asset_config.asset_id,
+        asset_role=payload.asset_config.asset_role,
         camera_view=payload.asset_config.camera_view,
         handedness=payload.asset_config.handedness,
         selection_bbox_xyxy=selection_bbox_xyxy,
         selection_point_px=selection_point_px,
+        phase_annotations_file=payload.asset_config.phase_annotations_file,
         video_config=payload.video_config.to_domain(),
         metadata=dict(payload.asset_config.metadata),
     )

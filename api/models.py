@@ -38,6 +38,7 @@ class VideoExtractionConfigModel(BaseModel):
     bbox_thr: float = Field(default=0.5, alias="bboxThr", ge=0.0, le=1.0)
     use_mask: bool = Field(default=False, alias="useMask")
     inference_type: str = Field(default="body", alias="inferenceType")
+    sample_every_frame: bool = Field(default=False, alias="sampleEveryFrame")
 
     def to_domain(self) -> VideoExtractionConfig:
         return VideoExtractionConfig(
@@ -48,6 +49,7 @@ class VideoExtractionConfigModel(BaseModel):
             bbox_thr=self.bbox_thr,
             use_mask=self.use_mask,
             inference_type=self.inference_type,
+            sample_every_frame=self.sample_every_frame,
         )
 
 
@@ -77,6 +79,7 @@ class VideoAssetConfigModel(BaseModel):
     action_type: str | None = Field(default=None, alias="actionType")
     camera_view: str | None = Field(default=None, alias="cameraView")
     handedness: str | None = None
+    phase_annotations_file: str | None = Field(default=None, alias="phaseAnnotationsFile")
     skeleton_version: str = Field(default="sam3db_v1", alias="skeletonVersion")
     render_float_dtype: Literal["float16", "float32"] = Field(
         default="float16",
