@@ -52,8 +52,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--phase-annotations-file",
         default="",
         help=(
-            "Optional path to the reference phase annotations sidecar JSON. "
-            "Defaults to <video stem>.phase.json next to --video-path."
+            "Optional path to the reference phase annotations JSON. "
+            "Defaults to an iOS-style <baseVideoId>.json match near --video-path "
+            "or under a sibling Resources/PhaseAnnotations directory."
         ),
     )
     parser.add_argument(

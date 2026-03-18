@@ -44,8 +44,8 @@ def _write_dummy_video(path: Path, fps: float, num_frames: int) -> None:
 def _write_phase_annotations(
     path: Path,
     *,
-    reference_id: str,
-    action_type: str,
+    video_id: str,
+    technique_type: str,
     final_frame: int,
 ) -> None:
     if final_frame < 3:
@@ -57,10 +57,9 @@ def _write_phase_annotations(
         final_frame,
     ]
     payload = {
-        "schemaVersion": "technique_reference_phases.v1",
-        "referenceId": reference_id,
-        "actionType": action_type,
-        "phaseAnnotations": [
+        "videoId": video_id,
+        "techniqueType": technique_type,
+        "phases": [
             {
                 "id": "preparatory_phase",
                 "name": "Preparatory Phase",
@@ -261,15 +260,15 @@ def test_build_reference_assets_writes_npz_and_metadata(tmp_path: Path) -> None:
     _write_dummy_video(video1, fps=10.0, num_frames=8)
     _write_dummy_video(video2, fps=12.0, num_frames=12)
     _write_phase_annotations(
-        tmp_path / "smash_1.phase.json",
-        reference_id="smash_pro_001",
-        action_type="smash",
+        tmp_path / "smash_1.json",
+        video_id="smash_1",
+        technique_type="smash",
         final_frame=7,
     )
     _write_phase_annotations(
-        tmp_path / "smash_2.phase.json",
-        reference_id="smash_pro_002",
-        action_type="smash",
+        tmp_path / "smash_2.json",
+        video_id="smash_2",
+        technique_type="smash",
         final_frame=11,
     )
 
@@ -351,11 +350,11 @@ def test_build_reference_assets_writes_npz_and_metadata(tmp_path: Path) -> None:
 def test_build_reference_asset_bundle_preserves_all_decodable_frames_for_img_1966_right(
     tmp_path: Path,
 ) -> None:
-    phase_file = tmp_path / "img_1966_right_golden.phase.json"
+    phase_file = tmp_path / "IMG_1966.json"
     _write_phase_annotations(
         phase_file,
-        reference_id="img_1966_right_golden",
-        action_type="smash",
+        video_id="IMG_1966",
+        technique_type="jump-smash",
         final_frame=100,
     )
     entry = ReferenceVideoEntry(
@@ -408,11 +407,11 @@ def test_build_reference_assets_rejects_truncated_phase_annotations(
 ) -> None:
     video = tmp_path / "smash_truncated.mp4"
     _write_dummy_video(video, fps=10.0, num_frames=8)
-    phase_file = tmp_path / "smash_truncated.phase.json"
+    phase_file = tmp_path / "smash_truncated.json"
     _write_phase_annotations(
         phase_file,
-        reference_id="smash_truncated",
-        action_type="smash",
+        video_id="smash_truncated",
+        technique_type="smash",
         final_frame=7,
     )
     entry = ReferenceVideoEntry(

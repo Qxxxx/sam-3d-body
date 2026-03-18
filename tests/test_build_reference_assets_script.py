@@ -34,15 +34,14 @@ def _write_dummy_video(path: Path, fps: float = 10.0, num_frames: int = 8) -> No
 def _write_phase_annotations(
     path: Path,
     *,
-    reference_id: str,
-    action_type: str,
+    video_id: str,
+    technique_type: str,
     final_frame: int,
 ) -> None:
     payload = {
-        "schemaVersion": "technique_reference_phases.v1",
-        "referenceId": reference_id,
-        "actionType": action_type,
-        "phaseAnnotations": [
+        "videoId": video_id,
+        "techniqueType": technique_type,
+        "phases": [
             {
                 "id": "preparatory_phase",
                 "name": "Preparatory Phase",
@@ -222,7 +221,7 @@ def test_load_entry_defaults_reference_id_from_video_name(tmp_path: Path) -> Non
     assert entry.reference_id == "smash_pro_01"
     assert entry.asset_role == "reference"
     assert entry.video_config.sample_every_frame is True
-    assert entry.phase_annotations_file == tmp_path / "Smash Pro 01.phase.json"
+    assert entry.phase_annotations_file == tmp_path / "Smash Pro 01.json"
     assert entry.selection_point_px is None
 
 
@@ -253,9 +252,9 @@ def test_main_builds_single_video_assets_and_summary(
     video_path = tmp_path / "Smash Pro 01.mp4"
     _write_dummy_video(video_path)
     _write_phase_annotations(
-        tmp_path / "Smash Pro 01.phase.json",
-        reference_id="smash_ref_001",
-        action_type="smash",
+        tmp_path / "Smash Pro 01.json",
+        video_id="Smash Pro 01",
+        technique_type="smash",
         final_frame=7,
     )
     output_dir = tmp_path / "out_assets"

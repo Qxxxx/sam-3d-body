@@ -95,12 +95,45 @@ def _derive_reference_id(video_path: str | Path) -> str:
     return _slugify(Path(raw_path).stem)
 
 
+def _base_video_stem(video_path: str | Path) -> str:
+    raw_path = str(video_path).strip()
+    stem = Path(urlparse(raw_path).path).stem if _is_remote_video_path(raw_path) else Path(raw_path).stem
+    lowered = stem.lower()
+    if lowered.endswith("_left"):
+        return stem[:-5]
+    if lowered.endswith("_right"):
+        return stem[:-6]
+    return stem
+
+
 def _default_phase_annotations_path(video_path: str | Path) -> Path | None:
     raw_path = str(video_path).strip()
     if _is_remote_video_path(raw_path):
         return None
     path = Path(raw_path)
-    return path.with_name(f"{path.stem}.phase.json")
+    base_stem = _base_video_stem(video_path)
+    candidates = []
+    if path.parent.name == "Videos":
+        candidates.append(path.parent.parent / "PhaseAnnotations" / f"{base_stem}.json")
+    candidates.extend(
+        [
+            path.with_name(f"{base_stem}.json"),
+            path.with_name(f"{path.stem}.json"),
+            path.with_name(f"{path.stem}.phase.json"),
+            path.with_name(f"{base_stem}.phase.json"),
+        ]
+    )
+    deduped_candidates: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped_candidates.append(candidate)
+    for candidate in deduped_candidates:
+        if candidate.exists():
+            return candidate
+    return deduped_candidates[0] if deduped_candidates else None
 
 
 def _normalize_optional_path(path_value: str | Path | None) -> str | Path | None:
@@ -387,30 +420,46 @@ def _load_phase_annotations(
     if not isinstance(payload, dict):
         raise ValueError("Phase annotations file must contain a JSON object.")
 
-    schema_version = str(payload.get("schemaVersion") or "").strip()
-    if schema_version != REFERENCE_PHASES_SCHEMA_VERSION:
-        raise ValueError(
-            f"Phase annotations schemaVersion must be {REFERENCE_PHASES_SCHEMA_VERSION}."
-        )
-
-    reference_id = _slugify(str(payload.get("referenceId") or ""))
-    if reference_id != entry.reference_id:
-        raise ValueError(
-            f"Phase annotations referenceId '{reference_id}' does not match '{entry.reference_id}'."
-        )
-
-    action_type = str(payload.get("actionType") or "").strip()
-    if action_type != entry.action_type:
-        raise ValueError(
-            f"Phase annotations actionType '{action_type}' does not match '{entry.action_type}'."
-        )
-
     raw_annotations = payload.get("phaseAnnotations")
-    if not isinstance(raw_annotations, list):
-        raise ValueError("Phase annotations file must include a phaseAnnotations array.")
+    if isinstance(raw_annotations, list):
+        schema_version = str(payload.get("schemaVersion") or "").strip()
+        if schema_version != REFERENCE_PHASES_SCHEMA_VERSION:
+            raise ValueError(
+                f"Phase annotations schemaVersion must be {REFERENCE_PHASES_SCHEMA_VERSION}."
+            )
+
+        reference_id = _slugify(str(payload.get("referenceId") or ""))
+        if reference_id != entry.reference_id:
+            raise ValueError(
+                f"Phase annotations referenceId '{reference_id}' does not match '{entry.reference_id}'."
+            )
+
+        action_type = str(payload.get("actionType") or "").strip()
+        if action_type != entry.action_type:
+            raise ValueError(
+                f"Phase annotations actionType '{action_type}' does not match '{entry.action_type}'."
+            )
+    else:
+        video_id = _slugify(str(payload.get("videoId") or ""))
+        expected_video_id = _slugify(_base_video_stem(entry.video_path))
+        if not video_id:
+            raise ValueError(
+                "Phase annotations file must include either phaseAnnotations or iOS-style videoId/phases."
+            )
+        if video_id != expected_video_id:
+            raise ValueError(
+                f"Phase annotations videoId '{video_id}' does not match source video '{expected_video_id}'."
+            )
+        technique_type = str(payload.get("techniqueType") or "").strip()
+        if not technique_type:
+            raise ValueError("iOS phase annotations file must include a non-empty techniqueType.")
+        raw_annotations = payload.get("phases")
+        if not isinstance(raw_annotations, list):
+            raise ValueError("iOS phase annotations file must include a phases array.")
+
     if len(raw_annotations) != len(REFERENCE_PHASE_IDS):
         raise ValueError(
-            f"phaseAnnotations must contain exactly {len(REFERENCE_PHASE_IDS)} entries."
+            f"Phase annotations must contain exactly {len(REFERENCE_PHASE_IDS)} entries."
         )
 
     annotations: list[ReferencePhaseAnnotation] = []
