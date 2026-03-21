@@ -492,9 +492,9 @@ def _load_phase_annotations(
             raise ValueError(
                 f"phaseAnnotations[{index}] must satisfy 0 <= startFrame <= endFrame."
             )
-        if previous_end_frame is not None and start_frame <= previous_end_frame:
+        if previous_end_frame is not None and start_frame < previous_end_frame:
             raise ValueError(
-                "phaseAnnotations must be strictly ordered and non-overlapping."
+                "phaseAnnotations must be ordered and may only share a boundary frame."
             )
 
         annotations.append(

@@ -429,6 +429,132 @@ def test_build_reference_assets_rejects_truncated_phase_annotations(
             output_dir=tmp_path / "out_assets",
         )
 
+
+def test_build_reference_assets_accepts_shared_phase_boundary_frames(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "smash_shared_boundary.mp4"
+    _write_dummy_video(video, fps=10.0, num_frames=8)
+    phase_file = tmp_path / "smash_shared_boundary.json"
+    phase_file.write_text(
+        json.dumps(
+            {
+                "videoId": "smash_shared_boundary",
+                "techniqueType": "smash",
+                "phases": [
+                    {
+                        "id": "preparatory_phase",
+                        "name": "Preparatory Phase",
+                        "description": "Load posture and prepare to swing.",
+                        "startFrame": 0,
+                        "endFrame": 1,
+                    },
+                    {
+                        "id": "backswing_phase",
+                        "name": "Backswing Phase",
+                        "description": "Draw the racket back.",
+                        "startFrame": 2,
+                        "endFrame": 3,
+                    },
+                    {
+                        "id": "power_generation_phase",
+                        "name": "Power Generation Phase",
+                        "description": "Accelerate into the shuttle.",
+                        "startFrame": 4,
+                        "endFrame": 4,
+                    },
+                    {
+                        "id": "followthrough_phase",
+                        "name": "Follow-through Phase",
+                        "description": "Finish the swing and recover.",
+                        "startFrame": 4,
+                        "endFrame": 7,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    entry = ReferenceVideoEntry(
+        video_path=video,
+        action_type="smash",
+        reference_id="smash_shared_boundary",
+        phase_annotations_file=phase_file,
+    )
+
+    metadata = build_reference_assets(
+        [entry],
+        estimator=_DummyEstimator(),  # type: ignore[arg-type]
+        output_dir=tmp_path / "out_assets",
+    )
+
+    asset = metadata["assets"][0]
+    assert asset["phaseAnnotations"][2]["endFrame"] == 4
+    assert asset["phaseAnnotations"][3]["startFrame"] == 4
+
+
+def test_build_reference_assets_rejects_true_overlapping_phase_ranges(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "smash_overlapping.mp4"
+    _write_dummy_video(video, fps=10.0, num_frames=8)
+    phase_file = tmp_path / "smash_overlapping.json"
+    phase_file.write_text(
+        json.dumps(
+            {
+                "videoId": "smash_overlapping",
+                "techniqueType": "smash",
+                "phases": [
+                    {
+                        "id": "preparatory_phase",
+                        "name": "Preparatory Phase",
+                        "description": "Load posture and prepare to swing.",
+                        "startFrame": 0,
+                        "endFrame": 1,
+                    },
+                    {
+                        "id": "backswing_phase",
+                        "name": "Backswing Phase",
+                        "description": "Draw the racket back.",
+                        "startFrame": 2,
+                        "endFrame": 4,
+                    },
+                    {
+                        "id": "power_generation_phase",
+                        "name": "Power Generation Phase",
+                        "description": "Accelerate into the shuttle.",
+                        "startFrame": 3,
+                        "endFrame": 5,
+                    },
+                    {
+                        "id": "followthrough_phase",
+                        "name": "Follow-through Phase",
+                        "description": "Finish the swing and recover.",
+                        "startFrame": 6,
+                        "endFrame": 7,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    entry = ReferenceVideoEntry(
+        video_path=video,
+        action_type="smash",
+        reference_id="smash_overlapping",
+        phase_annotations_file=phase_file,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="phaseAnnotations must be ordered and may only share a boundary frame",
+    ):
+        build_reference_assets(
+            [entry],
+            estimator=_DummyEstimator(),  # type: ignore[arg-type]
+            output_dir=tmp_path / "out_assets",
+        )
+
 def test_build_reference_assets_rejects_duplicate_reference_id(tmp_path: Path) -> None:
     video = tmp_path / "dup.mp4"
     _write_dummy_video(video, fps=10.0, num_frames=4)
