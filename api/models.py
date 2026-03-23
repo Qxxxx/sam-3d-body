@@ -89,12 +89,47 @@ class VideoAssetConfigModel(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class VideoAssetUploadTargetModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    put_url: str = Field(alias="putUrl")
+    fetch_url: str = Field(alias="fetchUrl")
+    content_type: str | None = Field(default=None, alias="contentType")
+
+    @model_validator(mode="after")
+    def validate_required_fields(self) -> "VideoAssetUploadTargetModel":
+        if not self.put_url.strip():
+            raise ValueError("storage.uploads.*.putUrl is required.")
+        if not self.fetch_url.strip():
+            raise ValueError("storage.uploads.*.fetchUrl is required.")
+        if self.content_type is not None and not self.content_type.strip():
+            raise ValueError("storage.uploads.*.contentType must be non-empty when provided.")
+        return self
+
+
+class VideoAssetUploadTargetsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    skeleton: VideoAssetUploadTargetModel
+    render: VideoAssetUploadTargetModel
+    metadata: VideoAssetUploadTargetModel
+
+
 class VideoAssetStorageModel(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    mode: Literal["local"] = "local"
+    mode: Literal["local", "direct_upload"] = "local"
     output_dir: str | None = Field(default=None, alias="outputDir")
     prefix: str = ""
+    uploads: VideoAssetUploadTargetsModel | None = None
+
+    @model_validator(mode="after")
+    def validate_storage_mode(self) -> "VideoAssetStorageModel":
+        if self.mode == "direct_upload" and self.uploads is None:
+            raise ValueError("storage.uploads is required when storage.mode is direct_upload.")
+        if self.mode == "local" and self.uploads is not None:
+            raise ValueError("storage.uploads is only supported when storage.mode is direct_upload.")
+        return self
 
 
 class VideoInferenceRequest(BaseModel):

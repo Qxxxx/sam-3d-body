@@ -7,6 +7,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -149,6 +150,46 @@ def _build_local_file_descriptor(
     )
 
 
+def _upload_file_to_target(
+    *,
+    path: Path,
+    put_url: str,
+    content_type: str | None,
+) -> None:
+    resolved_path = path.resolve()
+    headers: dict[str, str] = {}
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+
+    try:
+        response = httpx.put(
+            put_url,
+            content=resolved_path.read_bytes(),
+            headers=headers,
+            follow_redirects=True,
+            timeout=120.0,
+        )
+        response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise TimeoutError(f"Timed out uploading generated artifact to {put_url}") from exc
+    except httpx.HTTPError as exc:
+        raise ConnectionError(f"Failed to upload generated artifact to {put_url}: {exc}") from exc
+
+
+def _build_uploaded_file_descriptor(
+    *,
+    path: Path,
+    fetch_url: str,
+) -> GeneratedAssetFileModel:
+    resolved_path = path.resolve()
+    return GeneratedAssetFileModel(
+        path=str(resolved_path),
+        relativePath=None,
+        fetchUrl=fetch_url,
+        sizeBytes=int(resolved_path.stat().st_size),
+    )
+
+
 def _build_asset_entry(payload: VideoInferenceRequest) -> ReferenceVideoEntry:
     selection_bbox_xyxy = None
     selection_point_px = None
@@ -243,6 +284,58 @@ def create_app(
             metadata_path = output_dir / DEFAULT_METADATA_FILENAME
             save_reference_assets_metadata(manifest, metadata_path)
 
+            if payload.storage.mode == "direct_upload":
+                if payload.storage.uploads is None:
+                    raise ValueError(
+                        "storage.uploads is required when storage.mode is direct_upload."
+                    )
+
+                _upload_file_to_target(
+                    path=bundle.skeleton_path,
+                    put_url=payload.storage.uploads.skeleton.put_url,
+                    content_type=payload.storage.uploads.skeleton.content_type,
+                )
+                _upload_file_to_target(
+                    path=bundle.render_path,
+                    put_url=payload.storage.uploads.render.put_url,
+                    content_type=payload.storage.uploads.render.content_type,
+                )
+                _upload_file_to_target(
+                    path=metadata_path,
+                    put_url=payload.storage.uploads.metadata.put_url,
+                    content_type=payload.storage.uploads.metadata.content_type,
+                )
+
+                generated_files = GeneratedAssetFilesModel(
+                    skeleton=_build_uploaded_file_descriptor(
+                        path=bundle.skeleton_path,
+                        fetch_url=payload.storage.uploads.skeleton.fetch_url,
+                    ),
+                    render=_build_uploaded_file_descriptor(
+                        path=bundle.render_path,
+                        fetch_url=payload.storage.uploads.render.fetch_url,
+                    ),
+                    metadata=_build_uploaded_file_descriptor(
+                        path=metadata_path,
+                        fetch_url=payload.storage.uploads.metadata.fetch_url,
+                    ),
+                )
+            else:
+                generated_files = GeneratedAssetFilesModel(
+                    skeleton=_build_local_file_descriptor(
+                        settings=state.settings,
+                        path=bundle.skeleton_path,
+                    ),
+                    render=_build_local_file_descriptor(
+                        settings=state.settings,
+                        path=bundle.render_path,
+                    ),
+                    metadata=_build_local_file_descriptor(
+                        settings=state.settings,
+                        path=metadata_path,
+                    ),
+                )
+
             timestamps = bundle.sequence.timestamps.astype(np.float32).tolist()
             first_timestamp = float(timestamps[0])
             last_timestamp = float(timestamps[-1])
@@ -275,20 +368,7 @@ def create_app(
                     and bundle.render_asset.get("timestamps") is not None
                     else None
                 ),
-                files=GeneratedAssetFilesModel(
-                    skeleton=_build_local_file_descriptor(
-                        settings=state.settings,
-                        path=bundle.skeleton_path,
-                    ),
-                    render=_build_local_file_descriptor(
-                        settings=state.settings,
-                        path=bundle.render_path,
-                    ),
-                    metadata=_build_local_file_descriptor(
-                        settings=state.settings,
-                        path=metadata_path,
-                    ),
-                ),
+                files=generated_files,
                 manifest=manifest,
             )
             return dump_alias_model(response)
