@@ -236,6 +236,105 @@ def test_infer_video_endpoint_uploads_generated_files_for_direct_upload(
     assert all(len(body) > 0 for _, body, _ in uploaded_requests)
 
 
+def test_infer_video_endpoint_emits_trace_events_with_request_context(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    video_path = tmp_path / "user.mp4"
+    _write_dummy_video(video_path, fps=10.0, num_frames=10)
+    artifact_root = tmp_path / "artifacts"
+    trace_events: list[tuple[str, str]] = []
+
+    def _fake_httpx_put(
+        url: str,
+        *,
+        content: bytes,
+        headers: dict[str, str],
+        follow_redirects: bool,
+        timeout: float,
+    ) -> httpx.Response:
+        assert follow_redirects is True
+        assert timeout == 120.0
+        return httpx.Response(200, request=httpx.Request("PUT", url))
+
+    def _capture_trace_event(_settings: Any, _context: Any, **kwargs: Any) -> None:
+        trace_events.append((kwargs["stage"], kwargs["message"]))
+
+    monkeypatch.setattr("api.main.httpx.put", _fake_httpx_put)
+    monkeypatch.setattr("api.main._emit_trace_event", _capture_trace_event)
+
+    app = create_app(
+        estimator=_DummyEstimator(),
+        settings=ApiSettings(
+            checkpoint_path="/tmp/model.ckpt",
+            mhr_path="/tmp/mhr_model.pt",
+            device="cpu",
+            fov_name="moge2",
+            fov_path="",
+            artifact_root=str(artifact_root),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/infer/video",
+        headers={
+            "x-duolian-trace-id": "tech-trace-unit-test",
+            "x-duolian-client-run-id": "tech-client-run-unit-test",
+            "x-duolian-task-id": "tech-task-unit-test",
+        },
+        json={
+            "videoPath": str(video_path),
+            "selection": {"bbox": [10, 20, 60, 70]},
+            "videoConfig": {"targetFps": 5.0, "maxFrames": 3},
+            "assetConfig": {
+                "assetId": "user_bundle",
+                "actionType": "smash",
+                "handedness": "right",
+                "metadata": {
+                    "taskId": "tech-task-unit-test",
+                    "userId": "user-unit-test",
+                    "traceId": "tech-trace-unit-test",
+                    "clientRunId": "tech-client-run-unit-test",
+                    "matchId": "match-unit-test",
+                    "referenceAssetId": "ref-unit-test",
+                },
+            },
+            "storage": {
+                "mode": "direct_upload",
+                "prefix": "unit-tests",
+                "uploads": {
+                    "skeleton": {
+                        "putUrl": "https://uploads.example/skeleton.npz",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz",
+                        "contentType": "application/octet-stream",
+                    },
+                    "render": {
+                        "putUrl": "https://uploads.example/render.npz",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/render.npz",
+                        "contentType": "application/octet-stream",
+                    },
+                    "metadata": {
+                        "putUrl": "https://uploads.example/metadata.json",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/metadata.json",
+                        "contentType": "application/json",
+                    },
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert [stage for stage, _message in trace_events] == [
+        "request_received",
+        "artifact_output_dir_resolved",
+        "inference_started",
+        "artifact_written",
+        "direct_upload_started",
+        "direct_upload_completed",
+        "response_sent",
+    ]
+
+
 def test_infer_video_endpoint_maps_remote_fetch_failures_to_bad_gateway(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

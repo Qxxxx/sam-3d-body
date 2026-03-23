@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+import json
+import logging
 from pathlib import Path
 from threading import Lock
+import time
 from typing import TYPE_CHECKING, Any
+from urllib.request import Request as UrlRequest, urlopen
 from urllib.parse import quote
 
 import httpx
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from sam_3d_body import (
@@ -38,12 +42,26 @@ if TYPE_CHECKING:
     from sam_3d_body import SAM3DBodyEstimator
 
 
+LOGGER = logging.getLogger("sam3d.api")
+
+
 @dataclass
 class ServiceState:
     settings: ApiSettings
     estimator: "SAM3DBodyEstimator | Any | None" = None
     estimator_load_error: str | None = None
     estimator_lock: Lock = field(default_factory=Lock)
+
+
+@dataclass(frozen=True)
+class TechniqueTraceContext:
+    trace_id: str | None = None
+    task_id: str | None = None
+    user_id: str | None = None
+    client_run_id: str | None = None
+    match_id: str | None = None
+    technique_type: str | None = None
+    reference_asset_id: str | None = None
 
 
 def _build_estimator(settings: ApiSettings) -> "SAM3DBodyEstimator":
@@ -88,6 +106,139 @@ def _map_service_exception(exc: Exception) -> HTTPException:
     if isinstance(exc, ValueError):
         return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=500, detail=f"Internal server error: {exc}")
+
+
+def _normalize_optional_string(value: Any, *, max_length: int = 512) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized[:max_length]
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def _resolve_trace_context(
+    payload: VideoInferenceRequest,
+    request: Request | None,
+) -> TechniqueTraceContext:
+    metadata = payload.asset_config.metadata or {}
+    headers = request.headers if request is not None else {}
+    return TechniqueTraceContext(
+        trace_id=_normalize_optional_string(headers.get("x-duolian-trace-id"))
+        or _normalize_optional_string(metadata.get("traceId"), max_length=128),
+        task_id=_normalize_optional_string(headers.get("x-duolian-task-id"))
+        or _normalize_optional_string(metadata.get("taskId"), max_length=128),
+        user_id=_normalize_optional_string(metadata.get("userId"), max_length=128),
+        client_run_id=_normalize_optional_string(headers.get("x-duolian-client-run-id"))
+        or _normalize_optional_string(metadata.get("clientRunId"), max_length=128),
+        match_id=_normalize_optional_string(metadata.get("matchId"), max_length=128),
+        technique_type=_normalize_optional_string(
+            payload.asset_config.action_type,
+            max_length=64,
+        ),
+        reference_asset_id=_normalize_optional_string(
+            metadata.get("referenceAssetId"),
+            max_length=128,
+        ),
+    )
+
+
+def _emit_trace_event(
+    settings: ApiSettings,
+    context: TechniqueTraceContext,
+    *,
+    stage: str,
+    message: str,
+    level: str = "info",
+    meta: dict[str, Any] | None = None,
+) -> None:
+    safe_meta = _json_safe(meta or {})
+    log_payload = {
+        "event": "technique_trace",
+        "service": "sam-3d-body",
+        "runtimeEnv": settings.runtime_env,
+        "level": level,
+        "stage": stage,
+        "message": message,
+        "traceId": context.trace_id,
+        "taskId": context.task_id,
+        "userId": context.user_id,
+        "clientRunId": context.client_run_id,
+        "matchId": context.match_id,
+        "techniqueType": context.technique_type,
+        "referenceAssetId": context.reference_asset_id,
+        "meta": safe_meta,
+    }
+
+    logger_method = LOGGER.info
+    if level == "warn":
+        logger_method = LOGGER.warning
+    elif level == "error":
+        logger_method = LOGGER.error
+    logger_method(json.dumps(log_payload, ensure_ascii=True))
+
+    if (
+        not context.trace_id
+        or not settings.technique_trace_ingest_url
+        or not settings.technique_trace_ingest_token
+    ):
+        return
+
+    body = json.dumps(
+        {
+            "traceId": context.trace_id,
+            "taskId": context.task_id,
+            "userId": context.user_id,
+            "service": "sam-3d-body",
+            "runtimeEnv": settings.runtime_env,
+            "level": level,
+            "stage": stage,
+            "message": message,
+            "matchId": context.match_id,
+            "clientRunId": context.client_run_id,
+            "techniqueType": context.technique_type,
+            "referenceAssetId": context.reference_asset_id,
+            "meta": safe_meta,
+            "createdAt": int(time.time() * 1000),
+        },
+        ensure_ascii=True,
+    ).encode("utf-8")
+    request_obj = UrlRequest(
+        settings.technique_trace_ingest_url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "x-technique-trace-ingest-token": settings.technique_trace_ingest_token,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request_obj, timeout=5) as response:
+            response.read()
+    except Exception as exc:  # pragma: no cover - network failure depends on runtime env
+        LOGGER.warning(
+            json.dumps(
+                {
+                    "event": "technique_trace_ingest_failed",
+                    "traceId": context.trace_id,
+                    "taskId": context.task_id,
+                    "error": str(exc),
+                },
+                ensure_ascii=True,
+            )
+        )
 
 
 def _ensure_estimator(state: ServiceState) -> "SAM3DBodyEstimator | Any":
@@ -255,15 +406,58 @@ def create_app(
         return dump_alias_model(response)
 
     @app.post("/infer/video", response_model=VideoInferenceResponse)
-    def infer_video(payload: VideoInferenceRequest) -> dict[str, Any]:
+    def infer_video(
+        payload: VideoInferenceRequest,
+        request: Request | None = None,
+    ) -> dict[str, Any]:
         state: ServiceState = app.state.service_state
+        trace_context = _resolve_trace_context(payload, request)
         try:
+            _emit_trace_event(
+                state.settings,
+                trace_context,
+                stage="request_received",
+                message="Technique inference request received",
+                meta={
+                    "assetId": payload.asset_config.asset_id,
+                    "assetRole": payload.asset_config.asset_role,
+                    "storagePrefix": payload.storage.prefix,
+                    "storageMode": payload.storage.mode,
+                    "videoPathType": (
+                        "remote"
+                        if payload.video_path.startswith(("http://", "https://"))
+                        else "local"
+                    ),
+                    "hasSelection": payload.selection is not None,
+                },
+            )
             entry = _build_asset_entry(payload)
             output_dir = _resolve_asset_output_dir(
                 settings=state.settings,
                 asset_id=entry.reference_id or "asset",
                 storage_output_dir=payload.storage.output_dir,
                 storage_prefix=payload.storage.prefix,
+            )
+            _emit_trace_event(
+                state.settings,
+                trace_context,
+                stage="artifact_output_dir_resolved",
+                message="Technique artifact output directory resolved",
+                meta={
+                    "assetId": entry.reference_id or "asset",
+                    "outputDir": str(output_dir),
+                    "storagePrefix": payload.storage.prefix,
+                },
+            )
+            _emit_trace_event(
+                state.settings,
+                trace_context,
+                stage="inference_started",
+                message="Technique inference started",
+                meta={
+                    "assetId": entry.reference_id or "asset",
+                    "outputDir": str(output_dir),
+                },
             )
             bundle = build_reference_asset_bundle(
                 entry,
@@ -283,6 +477,19 @@ def create_app(
             )
             metadata_path = output_dir / DEFAULT_METADATA_FILENAME
             save_reference_assets_metadata(manifest, metadata_path)
+            _emit_trace_event(
+                state.settings,
+                trace_context,
+                stage="artifact_written",
+                message="Technique inference artifacts written",
+                meta={
+                    "assetId": entry.reference_id or "asset",
+                    "outputDir": str(output_dir),
+                    "skeletonPath": str(bundle.skeleton_path),
+                    "renderPath": str(bundle.render_path),
+                    "metadataPath": str(metadata_path),
+                },
+            )
 
             if payload.storage.mode == "direct_upload":
                 if payload.storage.uploads is None:
@@ -290,6 +497,18 @@ def create_app(
                         "storage.uploads is required when storage.mode is direct_upload."
                     )
 
+                _emit_trace_event(
+                    state.settings,
+                    trace_context,
+                    stage="direct_upload_started",
+                    message="Technique artifact direct upload started",
+                    meta={
+                        "assetId": entry.reference_id or "asset",
+                        "skeletonFetchUrl": payload.storage.uploads.skeleton.fetch_url,
+                        "renderFetchUrl": payload.storage.uploads.render.fetch_url,
+                        "metadataFetchUrl": payload.storage.uploads.metadata.fetch_url,
+                    },
+                )
                 _upload_file_to_target(
                     path=bundle.skeleton_path,
                     put_url=payload.storage.uploads.skeleton.put_url,
@@ -304,6 +523,18 @@ def create_app(
                     path=metadata_path,
                     put_url=payload.storage.uploads.metadata.put_url,
                     content_type=payload.storage.uploads.metadata.content_type,
+                )
+                _emit_trace_event(
+                    state.settings,
+                    trace_context,
+                    stage="direct_upload_completed",
+                    message="Technique artifact direct upload completed",
+                    meta={
+                        "assetId": entry.reference_id or "asset",
+                        "skeletonFetchUrl": payload.storage.uploads.skeleton.fetch_url,
+                        "renderFetchUrl": payload.storage.uploads.render.fetch_url,
+                        "metadataFetchUrl": payload.storage.uploads.metadata.fetch_url,
+                    },
                 )
 
                 generated_files = GeneratedAssetFilesModel(
@@ -371,9 +602,34 @@ def create_app(
                 files=generated_files,
                 manifest=manifest,
             )
+            _emit_trace_event(
+                state.settings,
+                trace_context,
+                stage="response_sent",
+                message="Technique inference response sent",
+                meta={
+                    "assetId": entry.reference_id or "asset",
+                    "numFrames": bundle.sequence.num_frames,
+                    "numJoints": bundle.sequence.num_joints,
+                    "metadataFetchUrl": dump_alias_model(response)["files"]["metadata"]["fetchUrl"],
+                },
+            )
             return dump_alias_model(response)
         except Exception as exc:
-            raise _map_service_exception(exc) from exc
+            mapped_exc = _map_service_exception(exc)
+            _emit_trace_event(
+                state.settings,
+                trace_context,
+                stage="request_failed",
+                message="Technique inference request failed",
+                level="error",
+                meta={
+                    "statusCode": mapped_exc.status_code,
+                    "detail": mapped_exc.detail,
+                    "errorType": exc.__class__.__name__,
+                },
+            )
+            raise mapped_exc from exc
 
     @app.get("/artifacts/{artifact_path:path}")
     def get_artifact(artifact_path: str) -> FileResponse:

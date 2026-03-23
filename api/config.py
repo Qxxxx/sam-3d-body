@@ -21,6 +21,9 @@ class ApiSettings:
     fov_path: str
     artifact_root: str
     eager_model_load: bool = False
+    technique_trace_ingest_url: str | None = None
+    technique_trace_ingest_token: str | None = None
+    runtime_env: str = "gpu-server"
 
 
 def _read_bool_env(name: str, default: bool) -> bool:
@@ -45,4 +48,11 @@ def load_api_settings() -> ApiSettings:
             str(Path(__file__).resolve().parents[1] / "tmp_api_assets"),
         ),
         eager_model_load=_read_bool_env("SAM3DBODY_EAGER_MODEL_LOAD", False),
+        technique_trace_ingest_url=(
+            os.getenv("SAM3DBODY_TECHNIQUE_TRACE_INGEST_URL", "").strip() or None
+        ),
+        technique_trace_ingest_token=(
+            os.getenv("SAM3DBODY_TECHNIQUE_TRACE_INGEST_TOKEN", "").strip() or None
+        ),
+        runtime_env=os.getenv("SAM3DBODY_RUNTIME_ENV", "gpu-server").strip() or "gpu-server",
     )
