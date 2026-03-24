@@ -116,7 +116,7 @@ def test_infer_video_endpoint_returns_asset_manifest_and_local_files(tmp_path: P
         }
     )
 
-    payload = infer_video_endpoint(request)
+    payload = infer_video_endpoint(request, None)
     assert payload["assetId"] == "user_bundle"
     assert payload["summary"]["numFrames"] == 3
     assert payload["summary"]["numJoints"] == 4
@@ -213,7 +213,7 @@ def test_infer_video_endpoint_uploads_generated_files_for_direct_upload(
         }
     )
 
-    payload = infer_video_endpoint(request)
+    payload = infer_video_endpoint(request, None)
     assert payload["assetId"] == "user_bundle"
     assert payload["files"]["skeleton"]["fetchUrl"] == (
         "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz"
@@ -372,7 +372,7 @@ def test_infer_video_endpoint_maps_remote_fetch_failures_to_bad_gateway(
     monkeypatch.setattr("sam_3d_body.video_processor.urlopen", _fake_urlopen)
 
     with pytest.raises(HTTPException) as exc_info:
-        infer_video_endpoint(request)
+        infer_video_endpoint(request, None)
 
     assert exc_info.value.status_code == 502
     assert "Failed to fetch video" in str(exc_info.value.detail)

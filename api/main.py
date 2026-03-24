@@ -408,7 +408,7 @@ def create_app(
     @app.post("/infer/video", response_model=VideoInferenceResponse)
     def infer_video(
         payload: VideoInferenceRequest,
-        request: Request | None = None,
+        request: Request,
     ) -> dict[str, Any]:
         state: ServiceState = app.state.service_state
         trace_context = _resolve_trace_context(payload, request)
