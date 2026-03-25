@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from api.config import ApiSettings
-from api.main import create_app
+from api.main import TechniqueTraceContext, create_app, _emit_trace_event
 from api.models import VideoInferenceRequest
 
 
@@ -333,6 +333,65 @@ def test_infer_video_endpoint_emits_trace_events_with_request_context(
         "direct_upload_completed",
         "response_sent",
     ]
+
+
+def test_emit_trace_event_uses_explicit_user_agent_for_ingest(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeResponse:
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return b'{"code":0,"message":"ok"}'
+
+    def _fake_urlopen(request_obj: Any, timeout: int = 30) -> _FakeResponse:
+        captured["url"] = request_obj.full_url
+        captured["timeout"] = timeout
+        captured["headers"] = {
+            key.lower(): value for key, value in request_obj.header_items()
+        }
+        return _FakeResponse()
+
+    monkeypatch.setattr("api.main.urlopen", _fake_urlopen)
+
+    settings = ApiSettings(
+        checkpoint_path="/tmp/model.ckpt",
+        mhr_path="/tmp/mhr_model.pt",
+        device="cpu",
+        fov_name="moge2",
+        fov_path="",
+        artifact_root="/tmp/artifacts",
+        technique_trace_ingest_url=(
+            "https://api-staging.duolian.cc/api/v1/analysis/technique/observability/events/internal"
+        ),
+        technique_trace_ingest_token="trace-token",
+        runtime_env="staging-gpu",
+    )
+    context = TechniqueTraceContext(
+        trace_id="tech-trace-unit-test",
+        task_id="tech-task-unit-test",
+        user_id="user-unit-test",
+        client_run_id="run-unit-test",
+        match_id="match-unit-test",
+        technique_type="smash",
+        reference_asset_id="ref-unit-test",
+    )
+
+    _emit_trace_event(
+        settings,
+        context,
+        stage="probe",
+        message="probe",
+    )
+
+    assert captured["url"] == settings.technique_trace_ingest_url
+    assert captured["timeout"] == 5
+    assert captured["headers"]["x-technique-trace-ingest-token"] == "trace-token"
+    assert captured["headers"]["user-agent"] == "curl/8.7.1"
 
 
 def test_infer_video_endpoint_maps_remote_fetch_failures_to_bad_gateway(

@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger("sam3d.api")
+TRACE_INGEST_USER_AGENT = "curl/8.7.1"
 
 
 @dataclass
@@ -221,6 +222,8 @@ def _emit_trace_event(
         headers={
             "Content-Type": "application/json",
             "x-technique-trace-ingest-token": settings.technique_trace_ingest_token,
+            # Cloudflare blocks Python urllib's default browser signature with 1010.
+            "User-Agent": TRACE_INGEST_USER_AGENT,
         },
         method="POST",
     )
