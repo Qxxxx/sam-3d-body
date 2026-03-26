@@ -148,6 +148,30 @@ class VideoInferenceRequest(BaseModel):
     storage: VideoAssetStorageModel = Field(default_factory=VideoAssetStorageModel)
 
 
+class VideoInferenceCallbackConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    url: str
+    token: str
+    task_id: str = Field(alias="taskId")
+    trace_id: str | None = Field(default=None, alias="traceId")
+    client_run_id: str | None = Field(default=None, alias="clientRunId")
+
+    @model_validator(mode="after")
+    def validate_required_fields(self) -> "VideoInferenceCallbackConfigModel":
+        if not self.url.strip():
+            raise ValueError("callback.url is required.")
+        if not self.token.strip():
+            raise ValueError("callback.token is required.")
+        if not self.task_id.strip():
+            raise ValueError("callback.taskId is required.")
+        return self
+
+
+class VideoInferenceJobRequest(VideoInferenceRequest):
+    callback: VideoInferenceCallbackConfigModel
+
+
 class VideoInferenceSummary(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -200,6 +224,47 @@ class VideoInferenceResponse(BaseModel):
     camera: VideoInferenceCameraModel | None = None
     files: GeneratedAssetFilesModel
     manifest: dict[str, Any]
+
+
+class VideoInferenceJobAcceptedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    job_id: str = Field(alias="jobId")
+    status: Literal["queued"]
+    accepted_at: int = Field(alias="acceptedAt")
+
+
+class VideoInferenceJobCallbackDeliveryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    status: Literal["pending", "delivering", "delivered"]
+    attempts: int
+    last_attempt_at: int | None = Field(default=None, alias="lastAttemptAt")
+    next_attempt_at: int | None = Field(default=None, alias="nextAttemptAt")
+    delivered_at: int | None = Field(default=None, alias="deliveredAt")
+    last_error: str | None = Field(default=None, alias="lastError")
+
+
+class VideoInferenceJobErrorModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    message: str
+    error_type: str | None = Field(default=None, alias="errorType")
+    status_code: int | None = Field(default=None, alias="statusCode")
+
+
+class VideoInferenceJobStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    job_id: str = Field(alias="jobId")
+    task_id: str = Field(alias="taskId")
+    status: Literal["queued", "running", "succeeded", "failed"]
+    accepted_at: int = Field(alias="acceptedAt")
+    started_at: int | None = Field(default=None, alias="startedAt")
+    completed_at: int | None = Field(default=None, alias="completedAt")
+    callback_delivery: VideoInferenceJobCallbackDeliveryModel = Field(alias="callbackDelivery")
+    result: dict[str, Any] | None = None
+    error: VideoInferenceJobErrorModel | None = None
 
 
 class HealthResponse(BaseModel):

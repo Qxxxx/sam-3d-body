@@ -24,6 +24,7 @@ class ApiSettings:
     technique_trace_ingest_url: str | None = None
     technique_trace_ingest_token: str | None = None
     runtime_env: str = "gpu-server"
+    job_concurrency: int = 1
 
 
 def _read_bool_env(name: str, default: bool) -> bool:
@@ -31,6 +32,17 @@ def _read_bool_env(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _read_positive_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
 
 
 def load_api_settings() -> ApiSettings:
@@ -55,4 +67,5 @@ def load_api_settings() -> ApiSettings:
             os.getenv("SAM3DBODY_TECHNIQUE_TRACE_INGEST_TOKEN", "").strip() or None
         ),
         runtime_env=os.getenv("SAM3DBODY_RUNTIME_ENV", "gpu-server").strip() or "gpu-server",
+        job_concurrency=_read_positive_int_env("SAM3DBODY_JOB_CONCURRENCY", 1),
     )

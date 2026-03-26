@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
 from typing import Any
 
 import cv2
@@ -12,7 +14,13 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from api.config import ApiSettings
-from api.main import TechniqueTraceContext, create_app, _emit_trace_event
+from api.main import (
+    TechniqueTraceContext,
+    _emit_inference_failure_event,
+    _emit_trace_event,
+    _run_video_inference_sync,
+    create_app,
+)
 from api.models import VideoInferenceRequest
 
 
@@ -72,6 +80,92 @@ def _route_endpoint(app: Any, path: str, method: str = "POST") -> Any:
     raise RuntimeError(f"Route not found: {method} {path}")
 
 
+def _build_async_job_request(video_path: str) -> dict[str, Any]:
+    return {
+        "videoPath": video_path,
+        "selection": {"bbox": [10, 20, 60, 70]},
+        "videoConfig": {"targetFps": 5.0, "maxFrames": 3},
+        "assetConfig": {
+            "assetId": "user_bundle",
+            "actionType": "smash",
+            "handedness": "right",
+            "metadata": {
+                "taskId": "tech-task-unit-test",
+                "userId": "user-unit-test",
+                "traceId": "tech-trace-unit-test",
+                "clientRunId": "tech-client-run-unit-test",
+                "matchId": "match-unit-test",
+                "referenceAssetId": "ref-unit-test",
+            },
+        },
+        "storage": {
+            "mode": "direct_upload",
+            "prefix": "unit-tests",
+            "uploads": {
+                "skeleton": {
+                    "putUrl": "https://uploads.example/skeleton.npz",
+                    "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz",
+                    "contentType": "application/octet-stream",
+                },
+                "render": {
+                    "putUrl": "https://uploads.example/render.npz",
+                    "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/render.npz",
+                    "contentType": "application/octet-stream",
+                },
+                "metadata": {
+                    "putUrl": "https://uploads.example/metadata.json",
+                    "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/metadata.json",
+                    "contentType": "application/json",
+                },
+            },
+        },
+        "callback": {
+            "url": "https://callback.example/internal/service-callback",
+            "token": "callback-token",
+            "taskId": "tech-task-unit-test",
+            "traceId": "tech-trace-unit-test",
+            "clientRunId": "tech-client-run-unit-test",
+        },
+    }
+
+
+def _build_async_job_result(asset_id: str) -> dict[str, Any]:
+    return {
+        "assetId": asset_id,
+        "summary": {
+            "numFrames": 3,
+            "numJoints": 4,
+            "firstTimestamp": 0.0,
+            "lastTimestamp": 0.4,
+            "durationSec": 0.4,
+            "sourceFps": 10.0,
+            "imageSizeHw": [80, 120],
+            "frameIndices": [0, 2, 4],
+        },
+        "files": {
+            "skeleton": {
+                "path": "/tmp/skeleton.npz",
+                "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz",
+                "sizeBytes": 101,
+            },
+            "render": {
+                "path": "/tmp/render.npz",
+                "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/render.npz",
+                "sizeBytes": 202,
+            },
+            "metadata": {
+                "path": "/tmp/metadata.json",
+                "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/metadata.json",
+                "sizeBytes": 303,
+            },
+        },
+        "manifest": {
+            "assetCount": 1,
+            "assets": [{"selectionBbox": [10.0, 20.0, 60.0, 70.0]}],
+        },
+    }
+
+
 def test_health_endpoint_returns_service_status() -> None:
     app = create_app(estimator=_DummyEstimator())
     health_endpoint = _route_endpoint(app, "/health", method="GET")
@@ -82,7 +176,7 @@ def test_health_endpoint_returns_service_status() -> None:
     assert payload["modelLoadError"] is None
 
 
-def test_infer_video_endpoint_returns_asset_manifest_and_local_files(tmp_path: Path) -> None:
+def test_run_video_inference_sync_returns_asset_manifest_and_local_files(tmp_path: Path) -> None:
     video_path = tmp_path / "user.mp4"
     _write_dummy_video(video_path, fps=10.0, num_frames=10)
     artifact_root = tmp_path / "artifacts"
@@ -98,7 +192,6 @@ def test_infer_video_endpoint_returns_asset_manifest_and_local_files(tmp_path: P
             artifact_root=str(artifact_root),
         ),
     )
-    infer_video_endpoint = _route_endpoint(app, "/infer/video")
     request = VideoInferenceRequest.model_validate(
         {
             "videoPath": str(video_path),
@@ -116,7 +209,7 @@ def test_infer_video_endpoint_returns_asset_manifest_and_local_files(tmp_path: P
         }
     )
 
-    payload = infer_video_endpoint(request, None)
+    payload = _run_video_inference_sync(app.state.service_state, request, TechniqueTraceContext())
     assert payload["assetId"] == "user_bundle"
     assert payload["summary"]["numFrames"] == 3
     assert payload["summary"]["numJoints"] == 4
@@ -144,7 +237,7 @@ def test_infer_video_endpoint_returns_asset_manifest_and_local_files(tmp_path: P
     assert len(render_response.content) > 0
 
 
-def test_infer_video_endpoint_uploads_generated_files_for_direct_upload(
+def test_run_video_inference_sync_uploads_generated_files_for_direct_upload(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     video_path = tmp_path / "user.mp4"
@@ -178,7 +271,6 @@ def test_infer_video_endpoint_uploads_generated_files_for_direct_upload(
             artifact_root=str(artifact_root),
         ),
     )
-    infer_video_endpoint = _route_endpoint(app, "/infer/video")
     request = VideoInferenceRequest.model_validate(
         {
             "videoPath": str(video_path),
@@ -213,7 +305,7 @@ def test_infer_video_endpoint_uploads_generated_files_for_direct_upload(
         }
     )
 
-    payload = infer_video_endpoint(request, None)
+    payload = _run_video_inference_sync(app.state.service_state, request, TechniqueTraceContext())
     assert payload["assetId"] == "user_bundle"
     assert payload["files"]["skeleton"]["fetchUrl"] == (
         "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz"
@@ -236,7 +328,7 @@ def test_infer_video_endpoint_uploads_generated_files_for_direct_upload(
     assert all(len(body) > 0 for _, body, _ in uploaded_requests)
 
 
-def test_infer_video_endpoint_emits_trace_events_with_request_context(
+def test_run_video_inference_sync_emits_trace_events_with_request_context(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     video_path = tmp_path / "user.mp4"
@@ -273,16 +365,8 @@ def test_infer_video_endpoint_emits_trace_events_with_request_context(
             artifact_root=str(artifact_root),
         ),
     )
-    client = TestClient(app)
-
-    response = client.post(
-        "/infer/video",
-        headers={
-            "x-duolian-trace-id": "tech-trace-unit-test",
-            "x-duolian-client-run-id": "tech-client-run-unit-test",
-            "x-duolian-task-id": "tech-task-unit-test",
-        },
-        json={
+    request = VideoInferenceRequest.model_validate(
+        {
             "videoPath": str(video_path),
             "selection": {"bbox": [10, 20, 60, 70]},
             "videoConfig": {"targetFps": 5.0, "maxFrames": 3},
@@ -320,10 +404,22 @@ def test_infer_video_endpoint_emits_trace_events_with_request_context(
                     },
                 },
             },
-        },
+        }
+    )
+    _run_video_inference_sync(
+        app.state.service_state,
+        request,
+        TechniqueTraceContext(
+            trace_id="tech-trace-unit-test",
+            task_id="tech-task-unit-test",
+            user_id="user-unit-test",
+            client_run_id="tech-client-run-unit-test",
+            match_id="match-unit-test",
+            technique_type="smash",
+            reference_asset_id="ref-unit-test",
+        ),
     )
 
-    assert response.status_code == 200
     assert [stage for stage, _message in trace_events] == [
         "request_received",
         "artifact_output_dir_resolved",
@@ -394,7 +490,7 @@ def test_emit_trace_event_uses_explicit_user_agent_for_ingest(monkeypatch: Any) 
     assert captured["headers"]["user-agent"] == "curl/8.7.1"
 
 
-def test_infer_video_endpoint_maps_remote_fetch_failures_to_bad_gateway(
+def test_run_video_inference_sync_maps_remote_fetch_failures_to_bad_gateway(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     artifact_root = tmp_path / "artifacts"
@@ -409,7 +505,6 @@ def test_infer_video_endpoint_maps_remote_fetch_failures_to_bad_gateway(
             artifact_root=str(artifact_root),
         ),
     )
-    infer_video_endpoint = _route_endpoint(app, "/infer/video")
     request = VideoInferenceRequest.model_validate(
         {
             "videoPath": "https://example.com/forbidden.mp4",
@@ -431,7 +526,14 @@ def test_infer_video_endpoint_maps_remote_fetch_failures_to_bad_gateway(
     monkeypatch.setattr("sam_3d_body.video_processor.urlopen", _fake_urlopen)
 
     with pytest.raises(HTTPException) as exc_info:
-        infer_video_endpoint(request, None)
+        try:
+            _run_video_inference_sync(app.state.service_state, request, TechniqueTraceContext())
+        except Exception as exc:
+            raise _emit_inference_failure_event(
+                app.state.service_state.settings,
+                TechniqueTraceContext(),
+                exc,
+            ) from exc
 
     assert exc_info.value.status_code == 502
     assert "Failed to fetch video" in str(exc_info.value.detail)
@@ -478,3 +580,209 @@ def test_video_inference_request_rejects_legacy_fields() -> None:
                 "saveNpzPath": "/tmp/out.npz",
             }
         )
+
+
+def test_infer_video_jobs_endpoint_returns_accepted_response_without_waiting_for_completion(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    started_event = threading.Event()
+    release_event = threading.Event()
+    callback_requests: list[dict[str, Any]] = []
+
+    def _fake_run_video_inference_sync(
+        _state: Any,
+        payload: Any,
+        _trace_context: Any,
+    ) -> dict[str, Any]:
+        started_event.set()
+        assert payload.asset_config.asset_id == "user_bundle"
+        assert release_event.wait(timeout=2.0) is True
+        return _build_async_job_result("user_bundle")
+
+    def _fake_httpx_post(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        follow_redirects: bool,
+        timeout: float,
+    ) -> httpx.Response:
+        callback_requests.append(
+            {
+                "url": url,
+                "json": json,
+                "headers": headers,
+                "follow_redirects": follow_redirects,
+                "timeout": timeout,
+            }
+        )
+        return httpx.Response(202, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("api.main._run_video_inference_sync", _fake_run_video_inference_sync)
+    monkeypatch.setattr("api.main.httpx.post", _fake_httpx_post)
+    monkeypatch.setattr("api.main.JOB_CALLBACK_LOOP_INTERVAL_SECONDS", 0.01)
+
+    app = create_app(
+        estimator=_DummyEstimator(),
+        settings=ApiSettings(
+            checkpoint_path="/tmp/model.ckpt",
+            mhr_path="/tmp/mhr_model.pt",
+            device="cpu",
+            fov_name="moge2",
+            fov_path="",
+            artifact_root=str(artifact_root),
+        ),
+    )
+
+    with TestClient(app) as client:
+        started_at = time.monotonic()
+        response = client.post("/infer/video/jobs", json=_build_async_job_request("/tmp/video.mp4"))
+        elapsed = time.monotonic() - started_at
+
+        assert response.status_code == 202
+        payload = response.json()
+        assert payload["status"] == "queued"
+        assert payload["jobId"].startswith("infer-video-job-")
+        assert elapsed < 0.5
+
+        job_response = client.get(f"/infer/video/jobs/{payload['jobId']}")
+        assert job_response.status_code == 200
+        assert job_response.json()["status"] in {"queued", "running"}
+
+        assert started_event.wait(timeout=1.0) is True
+        release_event.set()
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            final_response = client.get(f"/infer/video/jobs/{payload['jobId']}")
+            final_payload = final_response.json()
+            if (
+                final_payload["status"] == "succeeded"
+                and final_payload["callbackDelivery"]["status"] == "delivered"
+            ):
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("async inference job did not finish in time")
+
+        assert final_payload["result"]["assetId"] == "user_bundle"
+        assert callback_requests[0]["json"]["status"] == "succeeded"
+        assert callback_requests[0]["json"]["taskId"] == "tech-task-unit-test"
+        assert (
+            callback_requests[0]["headers"]["x-technique-service-callback-token"]
+            == "callback-token"
+        )
+
+
+def test_infer_video_jobs_retry_callback_and_recover_after_restart(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    callback_attempts: list[str] = []
+
+    def _fake_run_video_inference_sync(
+        _state: Any,
+        _payload: Any,
+        _trace_context: Any,
+    ) -> dict[str, Any]:
+        return _build_async_job_result("user_bundle")
+
+    def _failing_httpx_post(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        follow_redirects: bool,
+        timeout: float,
+    ) -> httpx.Response:
+        callback_attempts.append(json["status"])
+        assert headers["x-technique-service-callback-token"] == "callback-token"
+        return httpx.Response(500, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("api.main._run_video_inference_sync", _fake_run_video_inference_sync)
+    monkeypatch.setattr("api.main.httpx.post", _failing_httpx_post)
+    monkeypatch.setattr("api.main.JOB_CALLBACK_LOOP_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("api.main.JOB_CALLBACK_BASE_BACKOFF_SECONDS", 0.01)
+    monkeypatch.setattr("api.main.JOB_CALLBACK_MAX_BACKOFF_SECONDS", 0.05)
+
+    app = create_app(
+        estimator=_DummyEstimator(),
+        settings=ApiSettings(
+            checkpoint_path="/tmp/model.ckpt",
+            mhr_path="/tmp/mhr_model.pt",
+            device="cpu",
+            fov_name="moge2",
+            fov_path="",
+            artifact_root=str(artifact_root),
+        ),
+    )
+
+    job_id = ""
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/infer/video/jobs",
+            json=_build_async_job_request("/tmp/video.mp4"),
+        )
+        assert create_response.status_code == 202
+        job_id = create_response.json()["jobId"]
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            job_response = client.get(f"/infer/video/jobs/{job_id}")
+            payload = job_response.json()
+            if (
+                payload["status"] == "succeeded"
+                and payload["callbackDelivery"]["attempts"] >= 1
+                and payload["callbackDelivery"]["status"] == "pending"
+            ):
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("callback retry state was not observed before shutdown")
+
+    assert callback_attempts
+
+    delivered_attempts: list[str] = []
+
+    def _successful_httpx_post(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        follow_redirects: bool,
+        timeout: float,
+    ) -> httpx.Response:
+        delivered_attempts.append(json["status"])
+        assert headers["x-technique-service-callback-token"] == "callback-token"
+        return httpx.Response(202, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("api.main.httpx.post", _successful_httpx_post)
+
+    recovered_app = create_app(
+        estimator=_DummyEstimator(),
+        settings=ApiSettings(
+            checkpoint_path="/tmp/model.ckpt",
+            mhr_path="/tmp/mhr_model.pt",
+            device="cpu",
+            fov_name="moge2",
+            fov_path="",
+            artifact_root=str(artifact_root),
+        ),
+    )
+
+    with TestClient(recovered_app) as client:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            job_response = client.get(f"/infer/video/jobs/{job_id}")
+            payload = job_response.json()
+            if payload["callbackDelivery"]["status"] == "delivered":
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("recovered callback delivery did not complete")
+
+        assert payload["status"] == "succeeded"
+        assert payload["callbackDelivery"]["attempts"] >= 2
+        assert payload["callbackDelivery"]["deliveredAt"] is not None
+        assert delivered_attempts == ["succeeded"]
