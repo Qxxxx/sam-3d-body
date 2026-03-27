@@ -3,13 +3,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 
 
 _DEFAULT_CHECKPOINT_DIR = (
-    Path(__file__).resolve().parents[1]
-    / "checkpoints"
-    / "sam-3d-body-dinov3"
+    Path(__file__).resolve().parents[1] / "checkpoints" / "sam-3d-body-dinov3"
 )
+_DEFAULT_ARTIFACT_ROOT = Path(tempfile.gettempdir()) / "sam3d-body-api"
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ def load_api_settings() -> ApiSettings:
         fov_path=os.getenv("SAM3DBODY_FOV_PATH", ""),
         artifact_root=os.getenv(
             "SAM3DBODY_ARTIFACT_ROOT",
-            str(Path(__file__).resolve().parents[1] / "tmp_api_assets"),
+            str(_DEFAULT_ARTIFACT_ROOT),
         ),
         eager_model_load=_read_bool_env("SAM3DBODY_EAGER_MODEL_LOAD", False),
         technique_trace_ingest_url=(
@@ -66,6 +66,7 @@ def load_api_settings() -> ApiSettings:
         technique_trace_ingest_token=(
             os.getenv("SAM3DBODY_TECHNIQUE_TRACE_INGEST_TOKEN", "").strip() or None
         ),
-        runtime_env=os.getenv("SAM3DBODY_RUNTIME_ENV", "gpu-server").strip() or "gpu-server",
+        runtime_env=os.getenv("SAM3DBODY_RUNTIME_ENV", "gpu-server").strip()
+        or "gpu-server",
         job_concurrency=_read_positive_int_env("SAM3DBODY_JOB_CONCURRENCY", 1),
     )

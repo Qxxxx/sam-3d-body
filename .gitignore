@@ -110,6 +110,7 @@ lightning_logs/
 results/
 sandbox/
 debug/
+tmp_api_assets/
 
 # Project-specific: Local tools
 .sl/

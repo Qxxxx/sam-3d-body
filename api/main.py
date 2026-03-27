@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 import logging
 from pathlib import Path
+import shutil
 from threading import Lock
 import time
 from typing import TYPE_CHECKING, Any
@@ -174,8 +176,10 @@ def _build_job_trace_context(
 ) -> TechniqueTraceContext:
     resolved = _resolve_trace_context(payload, request)
     return TechniqueTraceContext(
-        trace_id=resolved.trace_id or _normalize_optional_string(callback.trace_id, max_length=128),
-        task_id=resolved.task_id or _normalize_optional_string(callback.task_id, max_length=128),
+        trace_id=resolved.trace_id
+        or _normalize_optional_string(callback.trace_id, max_length=128),
+        task_id=resolved.task_id
+        or _normalize_optional_string(callback.task_id, max_length=128),
         user_id=resolved.user_id,
         client_run_id=resolved.client_run_id
         or _normalize_optional_string(callback.client_run_id, max_length=128),
@@ -258,7 +262,9 @@ def _emit_trace_event(
     try:
         with urlopen(request_obj, timeout=5) as response:
             response.read()
-    except Exception as exc:  # pragma: no cover - network failure depends on runtime env
+    except (
+        Exception
+    ) as exc:  # pragma: no cover - network failure depends on runtime env
         LOGGER.warning(
             json.dumps(
                 {
@@ -353,9 +359,13 @@ def _upload_file_to_target(
         )
         response.raise_for_status()
     except httpx.TimeoutException as exc:
-        raise TimeoutError(f"Timed out uploading generated artifact to {put_url}") from exc
+        raise TimeoutError(
+            f"Timed out uploading generated artifact to {put_url}"
+        ) from exc
     except httpx.HTTPError as exc:
-        raise ConnectionError(f"Failed to upload generated artifact to {put_url}: {exc}") from exc
+        raise ConnectionError(
+            f"Failed to upload generated artifact to {put_url}: {exc}"
+        ) from exc
 
 
 def _build_uploaded_file_descriptor(
@@ -370,6 +380,46 @@ def _build_uploaded_file_descriptor(
         fetchUrl=fetch_url,
         sizeBytes=int(resolved_path.stat().st_size),
     )
+
+
+def _cleanup_managed_artifact_output_dir(
+    *,
+    settings: ApiSettings,
+    output_dir: Path,
+    storage_output_dir: str | None,
+) -> None:
+    if storage_output_dir is not None:
+        return
+
+    artifact_root = Path(settings.artifact_root).expanduser().resolve()
+    resolved_output_dir = output_dir.expanduser().resolve()
+    try:
+        resolved_output_dir.relative_to(artifact_root)
+    except ValueError:
+        return
+
+    if not resolved_output_dir.exists():
+        return
+
+    try:
+        shutil.rmtree(resolved_output_dir)
+    except FileNotFoundError:
+        return
+    except Exception as exc:  # pragma: no cover - defensive logging
+        LOGGER.warning(
+            "Failed to clean managed artifact output dir %s: %s",
+            resolved_output_dir,
+            exc,
+        )
+        return
+
+    current = resolved_output_dir.parent
+    while current != artifact_root:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
 
 
 def _build_asset_entry(payload: VideoInferenceRequest) -> ReferenceVideoEntry:
@@ -558,6 +608,11 @@ def _run_video_inference_sync(
                 fetch_url=payload.storage.uploads.metadata.fetch_url,
             ),
         )
+        _cleanup_managed_artifact_output_dir(
+            settings=state.settings,
+            output_dir=output_dir,
+            storage_output_dir=payload.storage.output_dir,
+        )
     else:
         generated_files = GeneratedAssetFilesModel(
             skeleton=_build_local_file_descriptor(
@@ -656,30 +711,42 @@ def _list_job_record_paths(settings: ApiSettings) -> list[Path]:
     return sorted(path for path in jobs_root.glob("*/job.json") if path.is_file())
 
 
-def _normalize_job_callback_delivery(record: dict[str, Any], *, now_ms: int) -> dict[str, Any]:
+def _normalize_job_callback_delivery(
+    record: dict[str, Any], *, now_ms: int
+) -> dict[str, Any]:
     callback_delivery = record.get("callbackDelivery")
     if not isinstance(callback_delivery, dict):
         callback_delivery = {}
     return {
-        "status": callback_delivery.get("status")
-        if callback_delivery.get("status") in {"pending", "delivering", "delivered"}
-        else "pending",
+        "status": (
+            callback_delivery.get("status")
+            if callback_delivery.get("status") in {"pending", "delivering", "delivered"}
+            else "pending"
+        ),
         "attempts": int(callback_delivery.get("attempts") or 0),
-        "lastAttemptAt": callback_delivery.get("lastAttemptAt")
-        if isinstance(callback_delivery.get("lastAttemptAt"), int)
-        else None,
-        "nextAttemptAt": callback_delivery.get("nextAttemptAt")
-        if isinstance(callback_delivery.get("nextAttemptAt"), int)
-        else now_ms,
-        "deliveredAt": callback_delivery.get("deliveredAt")
-        if isinstance(callback_delivery.get("deliveredAt"), int)
-        else None,
+        "lastAttemptAt": (
+            callback_delivery.get("lastAttemptAt")
+            if isinstance(callback_delivery.get("lastAttemptAt"), int)
+            else None
+        ),
+        "nextAttemptAt": (
+            callback_delivery.get("nextAttemptAt")
+            if isinstance(callback_delivery.get("nextAttemptAt"), int)
+            else now_ms
+        ),
+        "deliveredAt": (
+            callback_delivery.get("deliveredAt")
+            if isinstance(callback_delivery.get("deliveredAt"), int)
+            else None
+        ),
         "lastError": _normalize_optional_string(callback_delivery.get("lastError")),
     }
 
 
 def _build_job_response_payload(record: dict[str, Any]) -> dict[str, Any]:
-    request_payload = record.get("request") if isinstance(record.get("request"), dict) else {}
+    request_payload = (
+        record.get("request") if isinstance(record.get("request"), dict) else {}
+    )
     callback_payload = (
         request_payload.get("callback")
         if isinstance(request_payload.get("callback"), dict)
@@ -708,6 +775,41 @@ def _build_job_response_payload(record: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _build_persisted_job_request(record: dict[str, Any]) -> dict[str, Any]:
+    request_payload = (
+        record.get("request") if isinstance(record.get("request"), dict) else {}
+    )
+    if not request_payload:
+        return {}
+
+    if record.get("status") in {"queued", "running"}:
+        return deepcopy(request_payload)
+
+    callback_payload = (
+        request_payload.get("callback")
+        if isinstance(request_payload.get("callback"), dict)
+        else {}
+    )
+    persisted_callback: dict[str, Any] = {}
+    for key in ("taskId", "traceId", "clientRunId"):
+        value = callback_payload.get(key)
+        if value is not None:
+            persisted_callback[key] = value
+
+    callback_delivery = (
+        record.get("callbackDelivery")
+        if isinstance(record.get("callbackDelivery"), dict)
+        else {}
+    )
+    if callback_delivery.get("status") != "delivered":
+        for key in ("url", "token"):
+            value = callback_payload.get(key)
+            if value is not None:
+                persisted_callback[key] = value
+
+    return {"callback": persisted_callback} if persisted_callback else {}
+
+
 def _job_callback_backoff_ms(attempts: int) -> int:
     if attempts <= 0:
         return int(JOB_CALLBACK_BASE_BACKOFF_SECONDS * 1000)
@@ -718,19 +820,31 @@ def _job_callback_backoff_ms(attempts: int) -> int:
     return int(seconds * 1000)
 
 
-def _extract_trace_context_from_job_record(record: dict[str, Any]) -> TechniqueTraceContext:
+def _extract_trace_context_from_job_record(
+    record: dict[str, Any],
+) -> TechniqueTraceContext:
     raw_trace_context = (
-        record.get("traceContext") if isinstance(record.get("traceContext"), dict) else {}
+        record.get("traceContext")
+        if isinstance(record.get("traceContext"), dict)
+        else {}
     )
     return TechniqueTraceContext(
-        trace_id=_normalize_optional_string(raw_trace_context.get("traceId"), max_length=128),
-        task_id=_normalize_optional_string(raw_trace_context.get("taskId"), max_length=128),
-        user_id=_normalize_optional_string(raw_trace_context.get("userId"), max_length=128),
+        trace_id=_normalize_optional_string(
+            raw_trace_context.get("traceId"), max_length=128
+        ),
+        task_id=_normalize_optional_string(
+            raw_trace_context.get("taskId"), max_length=128
+        ),
+        user_id=_normalize_optional_string(
+            raw_trace_context.get("userId"), max_length=128
+        ),
         client_run_id=_normalize_optional_string(
             raw_trace_context.get("clientRunId"),
             max_length=128,
         ),
-        match_id=_normalize_optional_string(raw_trace_context.get("matchId"), max_length=128),
+        match_id=_normalize_optional_string(
+            raw_trace_context.get("matchId"), max_length=128
+        ),
         technique_type=_normalize_optional_string(
             raw_trace_context.get("techniqueType"),
             max_length=64,
@@ -790,7 +904,10 @@ class AsyncInferenceJobManager:
     async def start(self) -> None:
         for worker_index in range(max(1, self._state.settings.job_concurrency)):
             self._worker_tasks.append(
-                asyncio.create_task(self._worker_loop(worker_index), name=f"sam3d-job-worker-{worker_index}")
+                asyncio.create_task(
+                    self._worker_loop(worker_index),
+                    name=f"sam3d-job-worker-{worker_index}",
+                )
             )
         self._callback_task = asyncio.create_task(
             self._callback_loop(),
@@ -879,19 +996,25 @@ class AsyncInferenceJobManager:
         await self._queue.put(job_id)
 
     async def _write_job_record(self, job_id: str, record: dict[str, Any]) -> None:
+        record_to_store = deepcopy(record)
+        record_to_store["request"] = _build_persisted_job_request(record_to_store)
         await asyncio.to_thread(
             _write_json_atomic,
             _job_record_path(self._state.settings, job_id),
-            record,
+            record_to_store,
         )
 
     async def _recover_jobs(self) -> None:
-        for job_path in await asyncio.to_thread(_list_job_record_paths, self._state.settings):
+        for job_path in await asyncio.to_thread(
+            _list_job_record_paths, self._state.settings
+        ):
             record = await asyncio.to_thread(_read_json, job_path)
             if not isinstance(record, dict):
                 continue
             now_ms = int(time.time() * 1000)
-            record["callbackDelivery"] = _normalize_job_callback_delivery(record, now_ms=now_ms)
+            record["callbackDelivery"] = _normalize_job_callback_delivery(
+                record, now_ms=now_ms
+            )
             trace_context = _extract_trace_context_from_job_record(record)
             if record.get("status") in {"queued", "running"}:
                 _emit_trace_event(
@@ -934,7 +1057,9 @@ class AsyncInferenceJobManager:
             try:
                 await self._run_job(job_id)
             except Exception as exc:  # pragma: no cover - defensive logging
-                LOGGER.exception("Unhandled async inference job error for %s: %s", job_id, exc)
+                LOGGER.exception(
+                    "Unhandled async inference job error for %s: %s", job_id, exc
+                )
             finally:
                 self._queue.task_done()
 
@@ -953,7 +1078,9 @@ class AsyncInferenceJobManager:
         now_ms = int(time.time() * 1000)
         record["status"] = "running"
         record["startedAt"] = record.get("startedAt") or now_ms
-        record["callbackDelivery"] = _normalize_job_callback_delivery(record, now_ms=now_ms)
+        record["callbackDelivery"] = _normalize_job_callback_delivery(
+            record, now_ms=now_ms
+        )
         await self._write_job_record(job_id, record)
         _emit_trace_event(
             self._state.settings,
@@ -980,7 +1107,9 @@ class AsyncInferenceJobManager:
             record["completedAt"] = completed_at
             record["result"] = result
             record["error"] = None
-            callback_delivery = _normalize_job_callback_delivery(record, now_ms=completed_at)
+            callback_delivery = _normalize_job_callback_delivery(
+                record, now_ms=completed_at
+            )
             callback_delivery["status"] = "pending"
             callback_delivery["nextAttemptAt"] = completed_at
             callback_delivery["lastError"] = None
@@ -996,7 +1125,9 @@ class AsyncInferenceJobManager:
                 },
             )
         except Exception as exc:
-            mapped_exc = _emit_inference_failure_event(self._state.settings, trace_context, exc)
+            mapped_exc = _emit_inference_failure_event(
+                self._state.settings, trace_context, exc
+            )
             completed_at = int(time.time() * 1000)
             record = await self.get_job_record(job_id)
             if record is None:
@@ -1009,7 +1140,9 @@ class AsyncInferenceJobManager:
                 "errorType": exc.__class__.__name__,
                 "statusCode": mapped_exc.status_code,
             }
-            callback_delivery = _normalize_job_callback_delivery(record, now_ms=completed_at)
+            callback_delivery = _normalize_job_callback_delivery(
+                record, now_ms=completed_at
+            )
             callback_delivery["status"] = "pending"
             callback_delivery["nextAttemptAt"] = completed_at
             callback_delivery["lastError"] = None
@@ -1040,7 +1173,9 @@ class AsyncInferenceJobManager:
 
     async def _deliver_due_callbacks(self) -> None:
         now_ms = int(time.time() * 1000)
-        for job_path in await asyncio.to_thread(_list_job_record_paths, self._state.settings):
+        for job_path in await asyncio.to_thread(
+            _list_job_record_paths, self._state.settings
+        ):
             record = await asyncio.to_thread(_read_json, job_path)
             if not isinstance(record, dict):
                 continue
@@ -1057,7 +1192,17 @@ class AsyncInferenceJobManager:
 
     async def _deliver_callback(self, record: dict[str, Any]) -> None:
         trace_context = _extract_trace_context_from_job_record(record)
-        request_payload = VideoInferenceJobRequest.model_validate(record["request"])
+        request_payload = (
+            record.get("request") if isinstance(record.get("request"), dict) else {}
+        )
+        callback_payload = (
+            request_payload.get("callback")
+            if isinstance(request_payload.get("callback"), dict)
+            else {}
+        )
+        callback_config = VideoInferenceCallbackConfigModel.model_validate(
+            callback_payload
+        )
         callback_delivery = _normalize_job_callback_delivery(
             record,
             now_ms=int(time.time() * 1000),
@@ -1079,13 +1224,13 @@ class AsyncInferenceJobManager:
             meta={
                 "jobId": record["jobId"],
                 "attempts": attempts,
-                "callbackUrl": request_payload.callback.url,
+                "callbackUrl": callback_config.url,
             },
         )
 
         callback_body: dict[str, Any] = {
             "jobId": record["jobId"],
-            "taskId": request_payload.callback.task_id,
+            "taskId": callback_config.task_id,
             "status": "succeeded" if record["status"] == "succeeded" else "failed",
             "traceId": trace_context.trace_id,
             "clientRunId": trace_context.client_run_id,
@@ -1097,8 +1242,8 @@ class AsyncInferenceJobManager:
 
         ok, error_message = await asyncio.to_thread(
             _post_callback_request,
-            url=request_payload.callback.url,
-            token=request_payload.callback.token,
+            url=callback_config.url,
+            token=callback_config.token,
             body=callback_body,
         )
 
@@ -1133,8 +1278,12 @@ class AsyncInferenceJobManager:
             return
 
         callback_delivery["status"] = "pending"
-        callback_delivery["lastError"] = (error_message or "Unknown callback delivery error")[:500]
-        callback_delivery["nextAttemptAt"] = int(time.time() * 1000) + _job_callback_backoff_ms(attempts)
+        callback_delivery["lastError"] = (
+            error_message or "Unknown callback delivery error"
+        )[:500]
+        callback_delivery["nextAttemptAt"] = int(
+            time.time() * 1000
+        ) + _job_callback_backoff_ms(attempts)
         record["callbackDelivery"] = callback_delivery
         await self._write_job_record(str(record["jobId"]), record)
         _emit_trace_event(
@@ -1168,7 +1317,10 @@ def create_app(
         service_state.job_manager = AsyncInferenceJobManager(service_state)
         await service_state.job_manager.start()
         try:
-            if service_state.settings.eager_model_load and service_state.estimator is None:
+            if (
+                service_state.settings.eager_model_load
+                and service_state.estimator is None
+            ):
                 try:
                     _ensure_estimator(service_state)
                 except HTTPException:
@@ -1197,14 +1349,20 @@ def create_app(
         )
         return dump_alias_model(response)
 
-    @app.post("/infer/video/jobs", response_model=VideoInferenceJobAcceptedResponse, status_code=202)
+    @app.post(
+        "/infer/video/jobs",
+        response_model=VideoInferenceJobAcceptedResponse,
+        status_code=202,
+    )
     async def create_infer_video_job(
         payload: VideoInferenceJobRequest,
         request: Request,
     ) -> dict[str, Any]:
         state: ServiceState = app.state.service_state
         if state.job_manager is None:
-            raise HTTPException(status_code=503, detail="Async inference job manager is unavailable.")
+            raise HTTPException(
+                status_code=503, detail="Async inference job manager is unavailable."
+            )
         trace_context = _build_job_trace_context(
             VideoInferenceRequest.model_validate(
                 payload.model_dump(by_alias=True, exclude={"callback"})
@@ -1220,11 +1378,15 @@ def create_app(
         )
         return dump_alias_model(response)
 
-    @app.get("/infer/video/jobs/{job_id}", response_model=VideoInferenceJobStatusResponse)
+    @app.get(
+        "/infer/video/jobs/{job_id}", response_model=VideoInferenceJobStatusResponse
+    )
     async def get_infer_video_job(job_id: str) -> dict[str, Any]:
         state: ServiceState = app.state.service_state
         if state.job_manager is None:
-            raise HTTPException(status_code=503, detail="Async inference job manager is unavailable.")
+            raise HTTPException(
+                status_code=503, detail="Async inference job manager is unavailable."
+            )
         record = await state.job_manager.get_job_record(job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -1235,7 +1397,9 @@ def create_app(
 
     @app.get("/artifacts/{artifact_path:path}")
     def get_artifact(artifact_path: str) -> FileResponse:
-        root = Path(app.state.service_state.settings.artifact_root).expanduser().resolve()
+        root = (
+            Path(app.state.service_state.settings.artifact_root).expanduser().resolve()
+        )
         resolved_path = (root / artifact_path).resolve()
         try:
             resolved_path.relative_to(root)

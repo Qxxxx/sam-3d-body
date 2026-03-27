@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import tempfile
 import threading
 import time
 from typing import Any
@@ -13,7 +15,7 @@ from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from api.config import ApiSettings
+from api.config import ApiSettings, load_api_settings
 from api.main import (
     TechniqueTraceContext,
     _emit_inference_failure_event,
@@ -48,7 +50,9 @@ class _DummyEstimator:
     def __init__(self) -> None:
         self.call_count = 0
 
-    def process_one_image(self, _frame_rgb: np.ndarray, **_kwargs: Any) -> list[dict[str, Any]]:
+    def process_one_image(
+        self, _frame_rgb: np.ndarray, **_kwargs: Any
+    ) -> list[dict[str, Any]]:
         value = float(self.call_count)
         self.call_count += 1
         keypoints = np.array(
@@ -75,7 +79,9 @@ class _DummyEstimator:
 
 def _route_endpoint(app: Any, path: str, method: str = "POST") -> Any:
     for route in app.routes:
-        if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
+        if getattr(route, "path", None) == path and method in getattr(
+            route, "methods", set()
+        ):
             return route.endpoint
     raise RuntimeError(f"Route not found: {method} {path}")
 
@@ -176,7 +182,21 @@ def test_health_endpoint_returns_service_status() -> None:
     assert payload["modelLoadError"] is None
 
 
-def test_run_video_inference_sync_returns_asset_manifest_and_local_files(tmp_path: Path) -> None:
+def test_load_api_settings_defaults_artifact_root_to_system_tmp(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.delenv("SAM3DBODY_ARTIFACT_ROOT", raising=False)
+
+    settings = load_api_settings()
+
+    assert (
+        Path(settings.artifact_root) == Path(tempfile.gettempdir()) / "sam3d-body-api"
+    )
+
+
+def test_run_video_inference_sync_returns_asset_manifest_and_local_files(
+    tmp_path: Path,
+) -> None:
     video_path = tmp_path / "user.mp4"
     _write_dummy_video(video_path, fps=10.0, num_frames=10)
     artifact_root = tmp_path / "artifacts"
@@ -209,7 +229,9 @@ def test_run_video_inference_sync_returns_asset_manifest_and_local_files(tmp_pat
         }
     )
 
-    payload = _run_video_inference_sync(app.state.service_state, request, TechniqueTraceContext())
+    payload = _run_video_inference_sync(
+        app.state.service_state, request, TechniqueTraceContext()
+    )
     assert payload["assetId"] == "user_bundle"
     assert payload["summary"]["numFrames"] == 3
     assert payload["summary"]["numJoints"] == 4
@@ -305,7 +327,9 @@ def test_run_video_inference_sync_uploads_generated_files_for_direct_upload(
         }
     )
 
-    payload = _run_video_inference_sync(app.state.service_state, request, TechniqueTraceContext())
+    payload = _run_video_inference_sync(
+        app.state.service_state, request, TechniqueTraceContext()
+    )
     assert payload["assetId"] == "user_bundle"
     assert payload["files"]["skeleton"]["fetchUrl"] == (
         "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz"
@@ -326,6 +350,10 @@ def test_run_video_inference_sync_uploads_generated_files_for_direct_upload(
     assert uploaded_requests[1][2]["Content-Type"] == "application/octet-stream"
     assert uploaded_requests[2][2]["Content-Type"] == "application/json"
     assert all(len(body) > 0 for _, body, _ in uploaded_requests)
+    assert not Path(payload["files"]["skeleton"]["path"]).exists()
+    assert not Path(payload["files"]["render"]["path"]).exists()
+    assert not Path(payload["files"]["metadata"]["path"]).exists()
+    assert not (artifact_root / "unit-tests" / "user_bundle").exists()
 
 
 def test_run_video_inference_sync_emits_trace_events_with_request_context(
@@ -521,13 +549,17 @@ def test_run_video_inference_sync_maps_remote_fetch_failures_to_bad_gateway(
     )
 
     def _fake_urlopen(_url: str, timeout: int = 30):
-        raise ConnectionError(f"Failed to fetch video: https://example.com/forbidden.mp4 (HTTP 403)")
+        raise ConnectionError(
+            f"Failed to fetch video: https://example.com/forbidden.mp4 (HTTP 403)"
+        )
 
     monkeypatch.setattr("sam_3d_body.video_processor.urlopen", _fake_urlopen)
 
     with pytest.raises(HTTPException) as exc_info:
         try:
-            _run_video_inference_sync(app.state.service_state, request, TechniqueTraceContext())
+            _run_video_inference_sync(
+                app.state.service_state, request, TechniqueTraceContext()
+            )
         except Exception as exc:
             raise _emit_inference_failure_event(
                 app.state.service_state.settings,
@@ -619,7 +651,9 @@ def test_infer_video_jobs_endpoint_returns_accepted_response_without_waiting_for
         )
         return httpx.Response(202, request=httpx.Request("POST", url))
 
-    monkeypatch.setattr("api.main._run_video_inference_sync", _fake_run_video_inference_sync)
+    monkeypatch.setattr(
+        "api.main._run_video_inference_sync", _fake_run_video_inference_sync
+    )
     monkeypatch.setattr("api.main.httpx.post", _fake_httpx_post)
     monkeypatch.setattr("api.main.JOB_CALLBACK_LOOP_INTERVAL_SECONDS", 0.01)
 
@@ -637,7 +671,9 @@ def test_infer_video_jobs_endpoint_returns_accepted_response_without_waiting_for
 
     with TestClient(app) as client:
         started_at = time.monotonic()
-        response = client.post("/infer/video/jobs", json=_build_async_job_request("/tmp/video.mp4"))
+        response = client.post(
+            "/infer/video/jobs", json=_build_async_job_request("/tmp/video.mp4")
+        )
         elapsed = time.monotonic() - started_at
 
         assert response.status_code == 202
@@ -673,6 +709,18 @@ def test_infer_video_jobs_endpoint_returns_accepted_response_without_waiting_for
             callback_requests[0]["headers"]["x-technique-service-callback-token"]
             == "callback-token"
         )
+        job_record = json.loads(
+            (artifact_root / "jobs" / payload["jobId"] / "job.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert job_record["request"] == {
+            "callback": {
+                "taskId": "tech-task-unit-test",
+                "traceId": "tech-trace-unit-test",
+                "clientRunId": "tech-client-run-unit-test",
+            }
+        }
 
 
 def test_infer_video_jobs_retry_callback_and_recover_after_restart(
@@ -700,7 +748,9 @@ def test_infer_video_jobs_retry_callback_and_recover_after_restart(
         assert headers["x-technique-service-callback-token"] == "callback-token"
         return httpx.Response(500, request=httpx.Request("POST", url))
 
-    monkeypatch.setattr("api.main._run_video_inference_sync", _fake_run_video_inference_sync)
+    monkeypatch.setattr(
+        "api.main._run_video_inference_sync", _fake_run_video_inference_sync
+    )
     monkeypatch.setattr("api.main.httpx.post", _failing_httpx_post)
     monkeypatch.setattr("api.main.JOB_CALLBACK_LOOP_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr("api.main.JOB_CALLBACK_BASE_BACKOFF_SECONDS", 0.01)
@@ -739,8 +789,22 @@ def test_infer_video_jobs_retry_callback_and_recover_after_restart(
                 break
             time.sleep(0.02)
         else:
-            raise AssertionError("callback retry state was not observed before shutdown")
+            raise AssertionError(
+                "callback retry state was not observed before shutdown"
+            )
 
+    job_record = json.loads(
+        (artifact_root / "jobs" / job_id / "job.json").read_text(encoding="utf-8")
+    )
+    assert job_record["request"] == {
+        "callback": {
+            "url": "https://callback.example/internal/service-callback",
+            "token": "callback-token",
+            "taskId": "tech-task-unit-test",
+            "traceId": "tech-trace-unit-test",
+            "clientRunId": "tech-client-run-unit-test",
+        }
+    }
     assert callback_attempts
 
     delivered_attempts: list[str] = []

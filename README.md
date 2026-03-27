@@ -84,6 +84,8 @@ Linux-only runtime:
 
 - local development, tests, and inference are supported only on Linux
 - the expected developer environment is `conda activate sam_3d_body`
+- API artifacts default to `${TMPDIR:-/tmp}/sam3d-body-api`; override with `SAM3DBODY_ARTIFACT_ROOT` if you need a persistent or larger volume
+- `storage.mode=direct_upload` still stages files locally first, then removes service-managed scratch output after a successful upload
 
 Deterministic local setup on Linux:
 
