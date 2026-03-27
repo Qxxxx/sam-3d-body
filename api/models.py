@@ -113,6 +113,10 @@ class VideoAssetUploadTargetsModel(BaseModel):
     skeleton: VideoAssetUploadTargetModel
     render: VideoAssetUploadTargetModel
     metadata: VideoAssetUploadTargetModel
+    cropped_video: VideoAssetUploadTargetModel | None = Field(
+        default=None,
+        alias="croppedVideo",
+    )
 
 
 class VideoAssetStorageModel(BaseModel):
@@ -214,6 +218,10 @@ class GeneratedAssetFilesModel(BaseModel):
     skeleton: GeneratedAssetFileModel
     render: GeneratedAssetFileModel
     metadata: GeneratedAssetFileModel
+    cropped_video: GeneratedAssetFileModel | None = Field(
+        default=None,
+        alias="croppedVideo",
+    )
 
 
 class VideoInferenceResponse(BaseModel):

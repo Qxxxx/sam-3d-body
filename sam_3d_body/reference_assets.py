@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 
 DEFAULT_METADATA_FILENAME = "metadata.json"
+DEFAULT_CROPPED_VIDEO_FILENAME = "source.mp4"
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 RENDER_ASSET_SCHEMA_VERSION = "technique_reference_render.v1"
 REFERENCE_PHASES_SCHEMA_VERSION = "technique_reference_phases.v1"
@@ -71,6 +72,7 @@ class ReferenceAssetBundle:
     sequence: SkeletonSequence
     skeleton_path: Path
     render_path: Path
+    cropped_video_path: Path | None
     asset_metadata: dict[str, Any]
     render_asset: dict[str, Any]
 
@@ -544,111 +546,272 @@ def _extract_reference_result(
     *,
     entry: ReferenceVideoEntry,
     estimator: SAM3DBodyEstimator,
+    resolved_video_path: str | Path | None = None,
 ) -> ReferenceExtractionResult:
     selection_bbox = (
         _validate_selection_bbox_xyxy(entry.selection_bbox_xyxy)
         if entry.selection_bbox_xyxy is not None
         else None
     )
-    with _resolve_video_file(entry.video_path) as video_file:
-        cap = cv2.VideoCapture(str(video_file))
-        if not cap.isOpened():
-            raise ValueError(f"Failed to open video: {video_file}")
+    if resolved_video_path is None:
+        with _resolve_video_file(entry.video_path) as video_file:
+            return _extract_reference_result(
+                entry=entry,
+                estimator=estimator,
+                resolved_video_path=video_file,
+            )
 
-        source_fps = float(cap.get(cv2.CAP_PROP_FPS))
-        if source_fps <= 0:
-            source_fps = max(1.0, entry.video_config.target_fps)
-        sample_every_n_frames = (
-            1
-            if entry.video_config.sample_every_frame
-            else max(1, int(round(source_fps / max(entry.video_config.target_fps, 1e-6))))
-        )
+    cap = cv2.VideoCapture(str(resolved_video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Failed to open video: {resolved_video_path}")
 
-        start_frame = max(0, int(round(entry.video_config.start_time_sec * source_fps)))
-        end_frame = (
-            int(round(entry.video_config.end_time_sec * source_fps))
-            if entry.video_config.end_time_sec is not None
-            else None
-        )
+    source_fps = float(cap.get(cv2.CAP_PROP_FPS))
+    if source_fps <= 0:
+        source_fps = max(1.0, entry.video_config.target_fps)
+    sample_every_n_frames = (
+        1
+        if entry.video_config.sample_every_frame
+        else max(1, int(round(source_fps / max(entry.video_config.target_fps, 1e-6))))
+    )
 
-        keypoints_sequence: list[np.ndarray] = []
-        timestamps: list[float] = []
-        frame_indices: list[int] = []
-        selected_outputs: list[dict[str, Any]] = []
+    start_frame = max(0, int(round(entry.video_config.start_time_sec * source_fps)))
+    end_frame = (
+        int(round(entry.video_config.end_time_sec * source_fps))
+        if entry.video_config.end_time_sec is not None
+        else None
+    )
 
-        frame_index = 0
-        previous_bbox: np.ndarray | None = None
-        image_size_hw: tuple[int, int] | None = None
-        try:
-            while True:
-                ok, frame_bgr = cap.read()
-                if not ok:
-                    break
-                if frame_index < start_frame:
-                    frame_index += 1
-                    continue
-                if end_frame is not None and frame_index > end_frame:
-                    break
-                if ((frame_index - start_frame) % sample_every_n_frames) != 0:
-                    frame_index += 1
-                    continue
+    keypoints_sequence: list[np.ndarray] = []
+    timestamps: list[float] = []
+    frame_indices: list[int] = []
+    selected_outputs: list[dict[str, Any]] = []
 
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                if image_size_hw is None:
-                    image_size_hw = (int(frame_rgb.shape[0]), int(frame_rgb.shape[1]))
-                outputs = estimator.process_one_image(
-                    frame_rgb,
-                    bbox_thr=entry.video_config.bbox_thr,
-                    use_mask=entry.video_config.use_mask,
-                    inference_type=entry.video_config.inference_type,
-                )
-
-                selected = _select_person_output(
-                    outputs,
-                    previous_bbox,
-                    selection_bbox,
-                    entry.selection_point_px,
-                )
-                if selected is None:
-                    frame_index += 1
-                    continue
-                if "pred_keypoints_3d" not in selected:
-                    frame_index += 1
-                    continue
-
-                keypoints = np.asarray(selected["pred_keypoints_3d"], dtype=np.float32)
-                if keypoints.ndim != 2 or keypoints.shape[1] != 3:
-                    frame_index += 1
-                    continue
-
-                keypoints_sequence.append(keypoints)
-                timestamps.append(frame_index / source_fps)
-                frame_indices.append(frame_index)
-                selected_outputs.append(selected)
-
-                previous_bbox = np.asarray(selected["bbox"], dtype=np.float32)
-                if len(keypoints_sequence) >= entry.video_config.max_frames:
-                    break
+    frame_index = 0
+    previous_bbox: np.ndarray | None = None
+    image_size_hw: tuple[int, int] | None = None
+    try:
+        while True:
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+            if frame_index < start_frame:
                 frame_index += 1
-        finally:
-            cap.release()
+                continue
+            if end_frame is not None and frame_index > end_frame:
+                break
+            if ((frame_index - start_frame) % sample_every_n_frames) != 0:
+                frame_index += 1
+                continue
 
-        if not keypoints_sequence:
-            raise ValueError("No valid skeleton frames extracted from video")
-        if image_size_hw is None:
-            raise ValueError("Failed to capture image size from video")
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            if image_size_hw is None:
+                image_size_hw = (int(frame_rgb.shape[0]), int(frame_rgb.shape[1]))
+            outputs = estimator.process_one_image(
+                frame_rgb,
+                bbox_thr=entry.video_config.bbox_thr,
+                use_mask=entry.video_config.use_mask,
+                inference_type=entry.video_config.inference_type,
+            )
 
-        return ReferenceExtractionResult(
-            sequence=SkeletonSequence(
-                keypoints_3d=np.stack(keypoints_sequence, axis=0),
-                timestamps=np.asarray(timestamps, dtype=np.float32),
-                joint_names=None,
-            ),
-            selected_outputs=selected_outputs,
-            frame_indices=np.asarray(frame_indices, dtype=np.int32),
-            source_fps=float(source_fps),
-            image_size_hw=image_size_hw,
-        )
+            selected = _select_person_output(
+                outputs,
+                previous_bbox,
+                selection_bbox,
+                entry.selection_point_px,
+            )
+            if selected is None:
+                frame_index += 1
+                continue
+            if "pred_keypoints_3d" not in selected:
+                frame_index += 1
+                continue
+
+            keypoints = np.asarray(selected["pred_keypoints_3d"], dtype=np.float32)
+            if keypoints.ndim != 2 or keypoints.shape[1] != 3:
+                frame_index += 1
+                continue
+
+            keypoints_sequence.append(keypoints)
+            timestamps.append(frame_index / source_fps)
+            frame_indices.append(frame_index)
+            selected_outputs.append(selected)
+
+            previous_bbox = np.asarray(selected["bbox"], dtype=np.float32)
+            if len(keypoints_sequence) >= entry.video_config.max_frames:
+                break
+            frame_index += 1
+    finally:
+        cap.release()
+
+    if not keypoints_sequence:
+        raise ValueError("No valid skeleton frames extracted from video")
+    if image_size_hw is None:
+        raise ValueError("Failed to capture image size from video")
+
+    return ReferenceExtractionResult(
+        sequence=SkeletonSequence(
+            keypoints_3d=np.stack(keypoints_sequence, axis=0),
+            timestamps=np.asarray(timestamps, dtype=np.float32),
+            joint_names=None,
+        ),
+        selected_outputs=selected_outputs,
+        frame_indices=np.asarray(frame_indices, dtype=np.int32),
+        source_fps=float(source_fps),
+        image_size_hw=image_size_hw,
+    )
+
+
+def _rolling_median_1d(values: np.ndarray, window_size: int = 5) -> np.ndarray:
+    if values.ndim != 1:
+        raise ValueError("values must be a 1D array")
+    if values.size <= 1 or window_size <= 1:
+        return values.astype(np.float32, copy=True)
+
+    radius = max(0, window_size // 2)
+    smoothed = np.empty_like(values, dtype=np.float32)
+    for index in range(values.shape[0]):
+        start = max(0, index - radius)
+        end = min(values.shape[0], index + radius + 1)
+        smoothed[index] = float(np.median(values[start:end]))
+    return smoothed
+
+
+def _force_even_size(size: int, maximum: int) -> int:
+    clamped = max(2, min(size, maximum))
+    if clamped % 2 == 1:
+        if clamped == maximum and clamped > 2:
+            clamped -= 1
+        else:
+            clamped += 1
+            clamped = min(clamped, maximum)
+            if clamped % 2 == 1 and clamped > 2:
+                clamped -= 1
+    return max(2, clamped)
+
+
+def _build_smoothed_crop_track(
+    extraction: ReferenceExtractionResult,
+    *,
+    padding_ratio: float = 0.15,
+    smoothing_window: int = 5,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    if not extraction.selected_outputs:
+        raise ValueError("No selected outputs available for cropped video generation")
+
+    bbox_xyxy = np.stack(
+        [
+            np.asarray(output["bbox"], dtype=np.float32).reshape(4)
+            for output in extraction.selected_outputs
+        ],
+        axis=0,
+    )
+    x1 = bbox_xyxy[:, 0]
+    y1 = bbox_xyxy[:, 1]
+    x2 = bbox_xyxy[:, 2]
+    y2 = bbox_xyxy[:, 3]
+
+    center_x = _rolling_median_1d((x1 + x2) * 0.5, smoothing_window)
+    center_y = _rolling_median_1d((y1 + y2) * 0.5, smoothing_window)
+    widths = _rolling_median_1d(x2 - x1, smoothing_window)
+    heights = _rolling_median_1d(y2 - y1, smoothing_window)
+
+    image_height, image_width = extraction.image_size_hw
+    crop_width = _force_even_size(
+        int(np.ceil(float(np.max(widths)) * (1.0 + padding_ratio))),
+        image_width,
+    )
+    crop_height = _force_even_size(
+        int(np.ceil(float(np.max(heights)) * (1.0 + padding_ratio))),
+        image_height,
+    )
+    return center_x, center_y, crop_width, crop_height
+
+
+def _resolve_crop_bounds(
+    *,
+    center_x: float,
+    center_y: float,
+    crop_width: int,
+    crop_height: int,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, int, int, int]:
+    max_x1 = max(0, frame_width - crop_width)
+    max_y1 = max(0, frame_height - crop_height)
+    x1 = min(max(int(round(center_x - crop_width * 0.5)), 0), max_x1)
+    y1 = min(max(int(round(center_y - crop_height * 0.5)), 0), max_y1)
+    x2 = x1 + crop_width
+    y2 = y1 + crop_height
+    return x1, y1, x2, y2
+
+
+def save_cropped_follow_video(
+    *,
+    video_path: str | Path,
+    extraction: ReferenceExtractionResult,
+    video_config: VideoExtractionConfig,
+    output_path: str | Path,
+) -> Path:
+    center_x, center_y, crop_width, crop_height = _build_smoothed_crop_track(extraction)
+    sampled_frame_indices = extraction.frame_indices.astype(np.float32)
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Failed to open video for cropped output: {video_path}")
+
+    source_fps = float(cap.get(cv2.CAP_PROP_FPS))
+    if source_fps <= 0:
+        source_fps = max(1.0, extraction.source_fps)
+    start_frame = max(0, int(round(video_config.start_time_sec * source_fps)))
+    end_frame = (
+        int(round(video_config.end_time_sec * source_fps))
+        if video_config.end_time_sec is not None
+        else None
+    )
+
+    writer = cv2.VideoWriter(
+        str(path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        source_fps,
+        (crop_width, crop_height),
+    )
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Failed to create cropped video writer: {path}")
+
+    try:
+        frame_index = 0
+        while True:
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+            if frame_index < start_frame:
+                frame_index += 1
+                continue
+            if end_frame is not None and frame_index > end_frame:
+                break
+
+            frame_height, frame_width = frame_bgr.shape[:2]
+            interpolated_center_x = float(np.interp(frame_index, sampled_frame_indices, center_x))
+            interpolated_center_y = float(np.interp(frame_index, sampled_frame_indices, center_y))
+            x1, y1, x2, y2 = _resolve_crop_bounds(
+                center_x=interpolated_center_x,
+                center_y=interpolated_center_y,
+                crop_width=crop_width,
+                crop_height=crop_height,
+                frame_width=frame_width,
+                frame_height=frame_height,
+            )
+            writer.write(frame_bgr[y1:y2, x1:x2])
+            frame_index += 1
+    finally:
+        writer.release()
+        cap.release()
+
+    return path
 
 
 def _stack_optional_field(
@@ -931,6 +1094,7 @@ def build_reference_asset_bundle(
     *,
     estimator: SAM3DBodyEstimator,
     output_dir: str | Path,
+    cropped_video_output_path: str | Path | None = None,
     render_asset_float_dtype: str = "float16",
     render_include_masks: bool = False,
     overwrite: bool = False,
@@ -953,34 +1117,55 @@ def build_reference_asset_bundle(
             f"Reference render output already exists: {render_output_npz}. Set overwrite=True to replace."
         )
 
-    extraction = _extract_reference_result(
-        entry=entry,
-        estimator=estimator,
+    cropped_video_path = (
+        Path(cropped_video_output_path)
+        if cropped_video_output_path is not None
+        else None
     )
-    phase_annotations = _load_phase_annotations(entry)
-    _validate_phase_annotations_against_extraction(phase_annotations, extraction)
-    sequence = extraction.sequence
-    save_skeleton_sequence_npz(sequence, output_npz)
-    render_asset = save_render_asset_npz(
-        extraction=extraction,
-        estimator=estimator,
-        output_path=render_output_npz,
-        float_dtype=render_asset_float_dtype,
-        include_masks=render_include_masks,
-    )
-    asset_metadata = _build_asset_metadata(
-        entry,
-        sequence,
-        output_npz,
-        extraction,
-        render_asset,
-        phase_annotations,
-    )
+    if cropped_video_path is not None and cropped_video_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Cropped video output already exists: {cropped_video_path}. Set overwrite=True to replace."
+        )
+
+    with _resolve_video_file(entry.video_path) as video_file:
+        extraction = _extract_reference_result(
+            entry=entry,
+            estimator=estimator,
+            resolved_video_path=video_file,
+        )
+        phase_annotations = _load_phase_annotations(entry)
+        _validate_phase_annotations_against_extraction(phase_annotations, extraction)
+        sequence = extraction.sequence
+        save_skeleton_sequence_npz(sequence, output_npz)
+        render_asset = save_render_asset_npz(
+            extraction=extraction,
+            estimator=estimator,
+            output_path=render_output_npz,
+            float_dtype=render_asset_float_dtype,
+            include_masks=render_include_masks,
+        )
+        if cropped_video_path is not None:
+            save_cropped_follow_video(
+                video_path=video_file,
+                extraction=extraction,
+                video_config=entry.video_config,
+                output_path=cropped_video_path,
+            )
+        asset_metadata = _build_asset_metadata(
+            entry,
+            sequence,
+            output_npz,
+            extraction,
+            render_asset,
+            phase_annotations,
+        )
+
     return ReferenceAssetBundle(
         entry=entry,
         sequence=sequence,
         skeleton_path=output_npz,
         render_path=render_output_npz,
+        cropped_video_path=cropped_video_path,
         asset_metadata=asset_metadata,
         render_asset=render_asset,
     )

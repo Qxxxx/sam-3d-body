@@ -356,6 +356,98 @@ def test_run_video_inference_sync_uploads_generated_files_for_direct_upload(
     assert not (artifact_root / "unit-tests" / "user_bundle").exists()
 
 
+def test_run_video_inference_sync_uploads_cropped_video_when_requested(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    video_path = tmp_path / "user.mp4"
+    _write_dummy_video(video_path, fps=10.0, num_frames=10)
+    artifact_root = tmp_path / "artifacts"
+    uploaded_requests: list[tuple[str, bytes, dict[str, str]]] = []
+
+    def _fake_httpx_put(
+        url: str,
+        *,
+        content: bytes,
+        headers: dict[str, str],
+        follow_redirects: bool,
+        timeout: float,
+    ) -> httpx.Response:
+        uploaded_requests.append((url, bytes(content), dict(headers)))
+        assert follow_redirects is True
+        assert timeout == 120.0
+        return httpx.Response(200, request=httpx.Request("PUT", url))
+
+    monkeypatch.setattr("api.main.httpx.put", _fake_httpx_put)
+
+    app = create_app(
+        estimator=_DummyEstimator(),
+        settings=ApiSettings(
+            checkpoint_path="/tmp/model.ckpt",
+            mhr_path="/tmp/mhr_model.pt",
+            device="cpu",
+            fov_name="moge2",
+            fov_path="",
+            artifact_root=str(artifact_root),
+        ),
+    )
+    request = VideoInferenceRequest.model_validate(
+        {
+            "videoPath": str(video_path),
+            "selection": {"bbox": [10, 20, 60, 70]},
+            "videoConfig": {"targetFps": 5.0, "maxFrames": 3},
+            "assetConfig": {
+                "assetId": "user_bundle",
+                "actionType": "smash",
+                "handedness": "right",
+            },
+            "storage": {
+                "mode": "direct_upload",
+                "prefix": "unit-tests",
+                "uploads": {
+                    "skeleton": {
+                        "putUrl": "https://uploads.example/skeleton.npz",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz",
+                        "contentType": "application/octet-stream",
+                    },
+                    "render": {
+                        "putUrl": "https://uploads.example/render.npz",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/render.npz",
+                        "contentType": "application/octet-stream",
+                    },
+                    "metadata": {
+                        "putUrl": "https://uploads.example/metadata.json",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/metadata.json",
+                        "contentType": "application/json",
+                    },
+                    "croppedVideo": {
+                        "putUrl": "https://uploads.example/source.mp4",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/source.mp4",
+                        "contentType": "video/mp4",
+                    },
+                },
+            },
+        }
+    )
+
+    payload = _run_video_inference_sync(
+        app.state.service_state, request, TechniqueTraceContext()
+    )
+    assert payload["files"]["croppedVideo"]["fetchUrl"] == (
+        "r2://test-bucket/technique/user-assets/user_bundle/source.mp4"
+    )
+    assert len(uploaded_requests) == 4
+    assert [request_url for request_url, _, _ in uploaded_requests] == [
+        "https://uploads.example/skeleton.npz",
+        "https://uploads.example/render.npz",
+        "https://uploads.example/metadata.json",
+        "https://uploads.example/source.mp4",
+    ]
+    assert uploaded_requests[3][2]["Content-Type"] == "video/mp4"
+    assert all(len(body) > 0 for _, body, _ in uploaded_requests)
+    assert not Path(payload["files"]["croppedVideo"]["path"]).exists()
+    assert not (artifact_root / "unit-tests" / "user_bundle").exists()
+
+
 def test_run_video_inference_sync_emits_trace_events_with_request_context(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

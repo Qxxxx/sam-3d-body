@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse
 
 from sam_3d_body import __version__
 from sam_3d_body.reference_assets import (
+    DEFAULT_CROPPED_VIDEO_FILENAME,
     DEFAULT_METADATA_FILENAME,
     ReferenceVideoEntry,
     build_reference_asset_bundle,
@@ -520,6 +521,12 @@ def _run_video_inference_sync(
         entry,
         estimator=_ensure_estimator(state),
         output_dir=output_dir,
+        cropped_video_output_path=(
+            output_dir / DEFAULT_CROPPED_VIDEO_FILENAME
+            if payload.storage.uploads is not None
+            and payload.storage.uploads.cropped_video is not None
+            else None
+        ),
         render_asset_float_dtype=payload.asset_config.render_float_dtype,
         render_include_masks=payload.asset_config.render_include_masks,
         overwrite=True,
@@ -545,6 +552,11 @@ def _run_video_inference_sync(
             "skeletonPath": str(bundle.skeleton_path),
             "renderPath": str(bundle.render_path),
             "metadataPath": str(metadata_path),
+            "croppedVideoPath": (
+                str(bundle.cropped_video_path)
+                if bundle.cropped_video_path is not None
+                else None
+            ),
         },
     )
 
@@ -564,6 +576,11 @@ def _run_video_inference_sync(
                 "skeletonFetchUrl": payload.storage.uploads.skeleton.fetch_url,
                 "renderFetchUrl": payload.storage.uploads.render.fetch_url,
                 "metadataFetchUrl": payload.storage.uploads.metadata.fetch_url,
+                "croppedVideoFetchUrl": (
+                    payload.storage.uploads.cropped_video.fetch_url
+                    if payload.storage.uploads.cropped_video is not None
+                    else None
+                ),
             },
         )
         _upload_file_to_target(
@@ -581,6 +598,15 @@ def _run_video_inference_sync(
             put_url=payload.storage.uploads.metadata.put_url,
             content_type=payload.storage.uploads.metadata.content_type,
         )
+        if (
+            bundle.cropped_video_path is not None
+            and payload.storage.uploads.cropped_video is not None
+        ):
+            _upload_file_to_target(
+                path=bundle.cropped_video_path,
+                put_url=payload.storage.uploads.cropped_video.put_url,
+                content_type=payload.storage.uploads.cropped_video.content_type,
+            )
         _emit_trace_event(
             state.settings,
             trace_context,
@@ -591,6 +617,11 @@ def _run_video_inference_sync(
                 "skeletonFetchUrl": payload.storage.uploads.skeleton.fetch_url,
                 "renderFetchUrl": payload.storage.uploads.render.fetch_url,
                 "metadataFetchUrl": payload.storage.uploads.metadata.fetch_url,
+                "croppedVideoFetchUrl": (
+                    payload.storage.uploads.cropped_video.fetch_url
+                    if payload.storage.uploads.cropped_video is not None
+                    else None
+                ),
             },
         )
 
@@ -606,6 +637,15 @@ def _run_video_inference_sync(
             metadata=_build_uploaded_file_descriptor(
                 path=metadata_path,
                 fetch_url=payload.storage.uploads.metadata.fetch_url,
+            ),
+            croppedVideo=(
+                _build_uploaded_file_descriptor(
+                    path=bundle.cropped_video_path,
+                    fetch_url=payload.storage.uploads.cropped_video.fetch_url,
+                )
+                if bundle.cropped_video_path is not None
+                and payload.storage.uploads.cropped_video is not None
+                else None
             ),
         )
         _cleanup_managed_artifact_output_dir(
@@ -626,6 +666,14 @@ def _run_video_inference_sync(
             metadata=_build_local_file_descriptor(
                 settings=state.settings,
                 path=metadata_path,
+            ),
+            croppedVideo=(
+                _build_local_file_descriptor(
+                    settings=state.settings,
+                    path=bundle.cropped_video_path,
+                )
+                if bundle.cropped_video_path is not None
+                else None
             ),
         )
 

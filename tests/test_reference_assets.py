@@ -10,6 +10,7 @@ import pytest
 
 from sam_3d_body.reference_assets import (
     ReferenceVideoEntry,
+    build_reference_asset_bundle,
     build_reference_assets,
     discover_reference_videos,
     load_reference_manifest,
@@ -569,3 +570,42 @@ def test_build_reference_assets_rejects_duplicate_reference_id(tmp_path: Path) -
             estimator=_DummyEstimator(),  # type: ignore[arg-type]
             output_dir=tmp_path / "out",
         )
+
+
+def test_build_reference_asset_bundle_writes_cropped_follow_video(tmp_path: Path) -> None:
+    video = tmp_path / "cropped.mp4"
+    _write_dummy_video(video, fps=10.0, num_frames=8)
+    phase_file = tmp_path / "cropped.json"
+    _write_phase_annotations(
+        phase_file,
+        video_id="cropped",
+        technique_type="smash",
+        final_frame=3,
+    )
+
+    bundle = build_reference_asset_bundle(
+        ReferenceVideoEntry(
+            video_path=video,
+            action_type="smash",
+            asset_role="user",
+            reference_id="cropped_user",
+            phase_annotations_file=phase_file,
+        ),
+        estimator=_DummyEstimator(),  # type: ignore[arg-type]
+        output_dir=tmp_path / "out",
+        cropped_video_output_path=tmp_path / "out" / "source.mp4",
+        overwrite=True,
+    )
+
+    assert bundle.cropped_video_path is not None
+    assert bundle.cropped_video_path.exists()
+
+    capture = cv2.VideoCapture(str(bundle.cropped_video_path))
+    ok, frame = capture.read()
+    capture.release()
+
+    assert ok
+    assert frame.shape[0] > 0
+    assert frame.shape[1] > 0
+    assert frame.shape[0] % 2 == 0
+    assert frame.shape[1] % 2 == 0
