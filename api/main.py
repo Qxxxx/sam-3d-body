@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
-import logging
 from pathlib import Path
 import shutil
 from threading import Lock
@@ -29,6 +28,7 @@ from sam_3d_body.reference_assets import (
     build_reference_assets_metadata,
     save_reference_assets_metadata,
 )
+from sam_3d_body.utils.logging import configure_logging, get_pylogger, log_event
 
 from .config import ApiSettings, load_api_settings
 from .models import (
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from sam_3d_body import SAM3DBodyEstimator
 
 
-LOGGER = logging.getLogger("sam3d.api")
+LOGGER = get_pylogger("sam3d.api")
 TRACE_INGEST_USER_AGENT = "curl/8.7.1"
 JOB_CALLBACK_USER_AGENT = "sam3d-body-job-runner/1.0"
 TECHNIQUE_SERVICE_CALLBACK_TOKEN_HEADER = "x-technique-service-callback-token"
@@ -217,12 +217,7 @@ def _emit_trace_event(
         "meta": safe_meta,
     }
 
-    logger_method = LOGGER.info
-    if level == "warn":
-        logger_method = LOGGER.warning
-    elif level == "error":
-        logger_method = LOGGER.error
-    logger_method(json.dumps(log_payload, ensure_ascii=True))
+    log_event(LOGGER, level, log_payload)
 
     if (
         not context.trace_id
@@ -266,31 +261,72 @@ def _emit_trace_event(
     except (
         Exception
     ) as exc:  # pragma: no cover - network failure depends on runtime env
-        LOGGER.warning(
-            json.dumps(
-                {
-                    "event": "technique_trace_ingest_failed",
-                    "traceId": context.trace_id,
-                    "taskId": context.task_id,
-                    "error": str(exc),
-                },
-                ensure_ascii=True,
-            )
+        log_event(
+            LOGGER,
+            "warn",
+            {
+                "event": "technique_trace_ingest_failed",
+                "traceId": context.trace_id,
+                "taskId": context.task_id,
+                "message": "Technique trace ingest failed",
+                "error": str(exc),
+            },
         )
 
 
-def _ensure_estimator(state: ServiceState) -> "SAM3DBodyEstimator | Any":
+def _ensure_estimator(
+    state: ServiceState,
+    trace_context: TechniqueTraceContext | None = None,
+) -> "SAM3DBodyEstimator | Any":
     if state.estimator is not None:
         return state.estimator
 
+    resolved_trace_context = trace_context or TechniqueTraceContext()
     with state.estimator_lock:
         if state.estimator is not None:
             return state.estimator
         try:
+            _emit_trace_event(
+                state.settings,
+                resolved_trace_context,
+                stage="estimator_load_started",
+                message="Technique estimator load started",
+                meta={
+                    "checkpointPath": state.settings.checkpoint_path,
+                    "mhrPath": state.settings.mhr_path,
+                    "device": state.settings.device,
+                    "fovName": state.settings.fov_name,
+                },
+            )
             state.estimator = _build_estimator(state.settings)
             state.estimator_load_error = None
+            _emit_trace_event(
+                state.settings,
+                resolved_trace_context,
+                stage="estimator_load_succeeded",
+                message="Technique estimator load succeeded",
+                meta={
+                    "device": state.settings.device,
+                    "fovName": state.settings.fov_name,
+                },
+            )
         except Exception as exc:  # pragma: no cover - depends on runtime environment
             state.estimator_load_error = str(exc)
+            _emit_trace_event(
+                state.settings,
+                resolved_trace_context,
+                stage="estimator_load_failed",
+                message="Technique estimator load failed",
+                level="error",
+                meta={
+                    "detail": str(exc),
+                    "errorType": exc.__class__.__name__,
+                    "checkpointPath": state.settings.checkpoint_path,
+                    "mhrPath": state.settings.mhr_path,
+                    "device": state.settings.device,
+                    "fovName": state.settings.fov_name,
+                },
+            )
             raise HTTPException(
                 status_code=503,
                 detail=f"Model is unavailable: {exc}",
@@ -367,6 +403,44 @@ def _upload_file_to_target(
         raise ConnectionError(
             f"Failed to upload generated artifact to {put_url}: {exc}"
         ) from exc
+
+
+def _upload_generated_artifact(
+    *,
+    settings: ApiSettings,
+    trace_context: TechniqueTraceContext,
+    asset_id: str,
+    artifact_type: str,
+    path: Path,
+    put_url: str,
+    fetch_url: str,
+    content_type: str | None,
+) -> None:
+    try:
+        _upload_file_to_target(
+            path=path,
+            put_url=put_url,
+            content_type=content_type,
+        )
+    except Exception as exc:
+        _emit_trace_event(
+            settings,
+            trace_context,
+            stage="artifact_upload_failed",
+            message="Technique artifact direct upload failed",
+            level="error",
+            meta={
+                "assetId": asset_id,
+                "artifactType": artifact_type,
+                "path": str(path),
+                "putUrl": put_url,
+                "fetchUrl": fetch_url,
+                "contentType": content_type,
+                "detail": str(exc),
+                "errorType": exc.__class__.__name__,
+            },
+        )
+        raise
 
 
 def _build_uploaded_file_descriptor(
@@ -519,7 +593,7 @@ def _run_video_inference_sync(
     )
     bundle = build_reference_asset_bundle(
         entry,
-        estimator=_ensure_estimator(state),
+        estimator=_ensure_estimator(state, trace_context),
         output_dir=output_dir,
         cropped_video_output_path=(
             output_dir / DEFAULT_CROPPED_VIDEO_FILENAME
@@ -583,28 +657,48 @@ def _run_video_inference_sync(
                 ),
             },
         )
-        _upload_file_to_target(
+        _upload_generated_artifact(
+            settings=state.settings,
+            trace_context=trace_context,
+            asset_id=entry.reference_id or "asset",
+            artifact_type="skeleton",
             path=bundle.skeleton_path,
             put_url=payload.storage.uploads.skeleton.put_url,
+            fetch_url=payload.storage.uploads.skeleton.fetch_url,
             content_type=payload.storage.uploads.skeleton.content_type,
         )
-        _upload_file_to_target(
+        _upload_generated_artifact(
+            settings=state.settings,
+            trace_context=trace_context,
+            asset_id=entry.reference_id or "asset",
+            artifact_type="render",
             path=bundle.render_path,
             put_url=payload.storage.uploads.render.put_url,
+            fetch_url=payload.storage.uploads.render.fetch_url,
             content_type=payload.storage.uploads.render.content_type,
         )
-        _upload_file_to_target(
+        _upload_generated_artifact(
+            settings=state.settings,
+            trace_context=trace_context,
+            asset_id=entry.reference_id or "asset",
+            artifact_type="metadata",
             path=metadata_path,
             put_url=payload.storage.uploads.metadata.put_url,
+            fetch_url=payload.storage.uploads.metadata.fetch_url,
             content_type=payload.storage.uploads.metadata.content_type,
         )
         if (
             bundle.cropped_video_path is not None
             and payload.storage.uploads.cropped_video is not None
         ):
-            _upload_file_to_target(
+            _upload_generated_artifact(
+                settings=state.settings,
+                trace_context=trace_context,
+                asset_id=entry.reference_id or "asset",
+                artifact_type="cropped_video",
                 path=bundle.cropped_video_path,
                 put_url=payload.storage.uploads.cropped_video.put_url,
+                fetch_url=payload.storage.uploads.cropped_video.fetch_url,
                 content_type=payload.storage.uploads.cropped_video.content_type,
             )
         _emit_trace_event(
@@ -1355,6 +1449,7 @@ def create_app(
     estimator: "SAM3DBodyEstimator | Any | None" = None,
 ) -> FastAPI:
     resolved_settings = settings or load_api_settings()
+    configure_logging(resolved_settings.log_level)
     service_state = ServiceState(
         settings=resolved_settings,
         estimator=estimator,

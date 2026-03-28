@@ -3,13 +3,25 @@ import os
 import torch
 
 from .models.meta_arch import SAM3DBody
+from .utils.logging import get_pylogger
 from .utils.config import get_config
 from .utils.checkpoint import load_state_dict
 
 
+logger = get_pylogger(__name__)
+
+
 def load_sam_3d_body(checkpoint_path: str = "", device: str = "cuda", mhr_path: str = ""):
-    print("Loading SAM 3D Body model...")
-    
+    logger.info(
+        "Loading SAM 3D Body model",
+        extra={
+            "component": "model_loader",
+            "checkpointPath": checkpoint_path,
+            "device": device,
+            "mhrPath": mhr_path,
+        },
+    )
+
     # Check the current directory, and if not present check the parent dir.
     model_cfg = os.path.join(os.path.dirname(checkpoint_path), "model_config.yaml")
     if not os.path.exists(model_cfg):

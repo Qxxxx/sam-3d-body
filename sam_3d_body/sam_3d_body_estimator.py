@@ -16,7 +16,11 @@ from sam_3d_body.data.transforms import (
 from sam_3d_body.data.utils.io import load_image
 from sam_3d_body.data.utils.prepare_batch import prepare_batch
 from sam_3d_body.utils import recursive_to
+from sam_3d_body.utils.logging import get_pylogger
 from torchvision.transforms import ToTensor
+
+
+logger = get_pylogger(__name__)
 
 
 class SAM3DBodyEstimator:
@@ -34,17 +38,26 @@ class SAM3DBodyEstimator:
         self.sam = human_segmentor
         self.fov_estimator = fov_estimator
         self.thresh_wrist_angle = 1.4
-        self._rgb_input_notice_emitted = False
+        self._emitted_runtime_notices: set[str] = set()
 
         # For mesh visualization
         self.faces = self.model.head_pose.faces.cpu().numpy()
 
         if self.detector is None:
-            print("No human detector is used...")
+            logger.info(
+                "Human detector is not configured; falling back to full-frame inference",
+                extra={"component": "estimator"},
+            )
         if self.sam is None:
-            print("Mask-condition inference is not supported...")
+            logger.info(
+                "Human segmentor is not configured; mask-conditioned inference is disabled",
+                extra={"component": "estimator"},
+            )
         if self.fov_estimator is None:
-            print("No FOV estimator... Using the default FOV!")
+            logger.info(
+                "FOV estimator is not configured; using default camera intrinsics",
+                extra={"component": "estimator"},
+            )
 
         self.transform = Compose(
             [
@@ -60,6 +73,18 @@ class SAM3DBodyEstimator:
                 VisionTransformWrapper(ToTensor()),
             ]
         )
+
+    def _log_once(
+        self,
+        key: str,
+        level: str,
+        message: str,
+        **extra: object,
+    ) -> None:
+        if key in self._emitted_runtime_notices:
+            return
+        self._emitted_runtime_notices.add(key)
+        getattr(logger, level)(message, extra=extra)
 
     @torch.no_grad()
     def process_one_image(
@@ -101,12 +126,16 @@ class SAM3DBodyEstimator:
             img = load_image(img, backend="cv2", image_format="bgr")
             image_format = "bgr"
         else:
-            if not self._rgb_input_notice_emitted:
-                print(
+            self._log_once(
+                "rgb_input_notice",
+                "warning",
+                (
                     "Input ndarray is assumed to be RGB. "
-                    "If your source is OpenCV BGR, convert with cv2.cvtColor(..., cv2.COLOR_BGR2RGB)."
-                )
-                self._rgb_input_notice_emitted = True
+                    "If your source is OpenCV BGR, convert with "
+                    "cv2.cvtColor(..., cv2.COLOR_BGR2RGB)."
+                ),
+                component="estimator",
+            )
             image_format = "rgb"
         height, width = img.shape[:2]
 
@@ -117,7 +146,14 @@ class SAM3DBodyEstimator:
             if image_format == "rgb":
                 img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 image_format = "bgr"
-            print("Running object detector...")
+            logger.debug(
+                "Running object detector",
+                extra={
+                    "component": "estimator",
+                    "bboxThreshold": float(bbox_thr),
+                    "nmsThreshold": float(nms_thr),
+                },
+            )
             boxes = self.detector.run_human_detection(
                 img,
                 det_cat_id=det_cat_id,
@@ -125,7 +161,13 @@ class SAM3DBodyEstimator:
                 nms_thr=nms_thr,
                 default_to_full_image=False,
             )
-            print("Found boxes:", boxes)
+            logger.debug(
+                "Object detector completed",
+                extra={
+                    "component": "estimator",
+                    "bboxCount": int(len(boxes)),
+                },
+            )
             self.is_crop = True
         else:
             boxes = np.array([0, 0, width, height]).reshape(1, 4)
@@ -143,7 +185,13 @@ class SAM3DBodyEstimator:
         masks_score = None
         if masks is not None:
             # Use provided masks - ensure they match the number of detected boxes
-            print(f"Using provided masks: {masks.shape}")
+            self._log_once(
+                "provided_masks_notice",
+                "debug",
+                "Using provided masks for inference",
+                component="estimator",
+                maskShape=list(masks.shape),
+            )
             assert (
                 bboxes is not None
             ), "Mask-conditioned inference requires bboxes input!"
@@ -153,7 +201,10 @@ class SAM3DBodyEstimator:
             )  # Set high confidence for provided masks
             use_mask = True
         elif use_mask and self.sam is not None:
-            print("Running SAM to get mask from bbox...")
+            logger.debug(
+                "Running SAM mask generation from bounding boxes",
+                extra={"component": "estimator"},
+            )
             # Generate masks using SAM2
             masks, masks_score = self.sam.run_sam(img, boxes)
         else:
@@ -170,12 +221,23 @@ class SAM3DBodyEstimator:
         # - either provided externally or generated via default FOV estimator
         camera_source = "default"
         if cam_int is not None:
-            print("Using provided camera intrinsics...")
+            self._log_once(
+                "provided_cam_intrinsics_notice",
+                "debug",
+                "Using provided camera intrinsics",
+                component="estimator",
+            )
             cam_int = cam_int.to(batch["img"])
             batch["cam_int"] = cam_int.clone()
             camera_source = "provided"
         elif self.fov_estimator is not None:
-            print("Running FOV estimator ...")
+            self._log_once(
+                "fov_estimator_runtime_notice",
+                "debug",
+                "Running FOV estimator for frames without provided camera intrinsics",
+                component="estimator",
+                estimatorName=str(getattr(self.fov_estimator, "name", "fov_estimator")),
+            )
             input_image = batch["img_ori"][0].data
             cam_int = self.fov_estimator.get_cam_intrinsics(input_image).to(
                 batch["img"]

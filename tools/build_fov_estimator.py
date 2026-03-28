@@ -2,6 +2,11 @@
 
 import torch
 
+from sam_3d_body.utils.logging import get_pylogger
+
+
+logger = get_pylogger("sam3d.tools.build_fov_estimator")
+
 
 class FOVEstimator:
     def __init__(self, name="moge2", device="cuda", **kwargs):
@@ -9,7 +14,14 @@ class FOVEstimator:
         self.name = name
 
         if name == "moge2":
-            print("########### Using fov estimator: MoGe2...")
+            logger.info(
+                "Configured FOV estimator",
+                extra={
+                    "component": "fov_estimator",
+                    "estimatorName": "moge2",
+                    "device": device,
+                },
+            )
             self.fov_estimator = load_moge(device, **kwargs)
             self.fov_estimator_func = run_moge
 

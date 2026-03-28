@@ -20,6 +20,7 @@ class ApiSettings:
     fov_name: str
     fov_path: str
     artifact_root: str
+    log_level: str = "INFO"
     eager_model_load: bool = False
     technique_trace_ingest_url: str | None = None
     technique_trace_ingest_token: str | None = None
@@ -59,6 +60,7 @@ def load_api_settings() -> ApiSettings:
             "SAM3DBODY_ARTIFACT_ROOT",
             str(_DEFAULT_ARTIFACT_ROOT),
         ),
+        log_level=os.getenv("SAM3DBODY_LOG_LEVEL", "INFO").strip() or "INFO",
         eager_model_load=_read_bool_env("SAM3DBODY_EAGER_MODEL_LOAD", False),
         technique_trace_ingest_url=(
             os.getenv("SAM3DBODY_TECHNIQUE_TRACE_INGEST_URL", "").strip() or None

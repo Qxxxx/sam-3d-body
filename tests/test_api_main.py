@@ -610,6 +610,223 @@ def test_emit_trace_event_uses_explicit_user_agent_for_ingest(monkeypatch: Any) 
     assert captured["headers"]["user-agent"] == "curl/8.7.1"
 
 
+def test_emit_trace_event_preserves_cf_backend_compatible_payload(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeResponse:
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return b'{"code":0,"message":"ok"}'
+
+    def _fake_urlopen(request_obj: Any, timeout: int = 30) -> _FakeResponse:
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request_obj.data.decode("utf-8"))
+        return _FakeResponse()
+
+    monkeypatch.setattr("api.main.urlopen", _fake_urlopen)
+
+    settings = ApiSettings(
+        checkpoint_path="/tmp/model.ckpt",
+        mhr_path="/tmp/mhr_model.pt",
+        device="cpu",
+        fov_name="moge2",
+        fov_path="",
+        artifact_root="/tmp/artifacts",
+        technique_trace_ingest_url=(
+            "https://api-staging.duolian.cc/api/v1/analysis/technique/observability/events/internal"
+        ),
+        technique_trace_ingest_token="trace-token",
+        runtime_env="staging-gpu",
+    )
+    context = TechniqueTraceContext(
+        trace_id="tech-trace-unit-test",
+        task_id="tech-task-unit-test",
+        user_id="user-unit-test",
+        client_run_id="run-unit-test",
+        match_id="match-unit-test",
+        technique_type="smash",
+        reference_asset_id="ref-unit-test",
+    )
+
+    _emit_trace_event(
+        settings,
+        context,
+        stage="probe",
+        message="probe",
+        level="warn",
+        meta={"attempt": 1, "path": "/tmp/probe"},
+    )
+
+    assert captured["timeout"] == 5
+    assert captured["body"]["traceId"] == "tech-trace-unit-test"
+    assert captured["body"]["taskId"] == "tech-task-unit-test"
+    assert captured["body"]["userId"] == "user-unit-test"
+    assert captured["body"]["service"] == "sam-3d-body"
+    assert captured["body"]["runtimeEnv"] == "staging-gpu"
+    assert captured["body"]["level"] == "warn"
+    assert captured["body"]["stage"] == "probe"
+    assert captured["body"]["message"] == "probe"
+    assert captured["body"]["matchId"] == "match-unit-test"
+    assert captured["body"]["clientRunId"] == "run-unit-test"
+    assert captured["body"]["techniqueType"] == "smash"
+    assert captured["body"]["referenceAssetId"] == "ref-unit-test"
+    assert captured["body"]["meta"] == {"attempt": 1, "path": "/tmp/probe"}
+    assert isinstance(captured["body"]["createdAt"], int)
+
+
+def test_run_video_inference_sync_emits_estimator_load_trace_events(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    video_path = tmp_path / "user.mp4"
+    _write_dummy_video(video_path, fps=10.0, num_frames=8)
+    artifact_root = tmp_path / "artifacts"
+    trace_events: list[tuple[str, dict[str, Any] | None]] = []
+
+    def _capture_trace_event(_settings: Any, _context: Any, **kwargs: Any) -> None:
+        trace_events.append((kwargs["stage"], kwargs.get("meta")))
+
+    monkeypatch.setattr("api.main._build_estimator", lambda _settings: _DummyEstimator())
+    monkeypatch.setattr("api.main._emit_trace_event", _capture_trace_event)
+
+    app = create_app(
+        estimator=None,
+        settings=ApiSettings(
+            checkpoint_path="/tmp/model.ckpt",
+            mhr_path="/tmp/mhr_model.pt",
+            device="cpu",
+            fov_name="moge2",
+            fov_path="",
+            artifact_root=str(artifact_root),
+        ),
+    )
+    request = VideoInferenceRequest.model_validate(
+        {
+            "videoPath": str(video_path),
+            "selection": {"bbox": [10, 20, 60, 70]},
+            "videoConfig": {"targetFps": 5.0, "maxFrames": 3},
+            "assetConfig": {
+                "assetId": "user_bundle",
+                "actionType": "smash",
+                "handedness": "right",
+            },
+            "storage": {
+                "mode": "local",
+                "prefix": "unit-tests",
+            },
+        }
+    )
+
+    _run_video_inference_sync(
+        app.state.service_state,
+        request,
+        TechniqueTraceContext(trace_id="tech-trace-unit-test"),
+    )
+
+    stages = [stage for stage, _meta in trace_events]
+    assert "estimator_load_started" in stages
+    assert "estimator_load_succeeded" in stages
+    started_meta = next(meta for stage, meta in trace_events if stage == "estimator_load_started")
+    assert started_meta is not None
+    assert started_meta["device"] == "cpu"
+    assert started_meta["fovName"] == "moge2"
+
+
+def test_run_video_inference_sync_emits_artifact_upload_failed_trace_event(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    video_path = tmp_path / "user.mp4"
+    _write_dummy_video(video_path, fps=10.0, num_frames=8)
+    artifact_root = tmp_path / "artifacts"
+    trace_events: list[tuple[str, dict[str, Any] | None]] = []
+
+    def _fake_httpx_put(
+        url: str,
+        *,
+        content: bytes,
+        headers: dict[str, str],
+        follow_redirects: bool,
+        timeout: float,
+    ) -> httpx.Response:
+        raise httpx.TimeoutException("upload timed out")
+
+    def _capture_trace_event(_settings: Any, _context: Any, **kwargs: Any) -> None:
+        trace_events.append((kwargs["stage"], kwargs.get("meta")))
+
+    monkeypatch.setattr("api.main.httpx.put", _fake_httpx_put)
+    monkeypatch.setattr("api.main._emit_trace_event", _capture_trace_event)
+
+    app = create_app(
+        estimator=_DummyEstimator(),
+        settings=ApiSettings(
+            checkpoint_path="/tmp/model.ckpt",
+            mhr_path="/tmp/mhr_model.pt",
+            device="cpu",
+            fov_name="moge2",
+            fov_path="",
+            artifact_root=str(artifact_root),
+        ),
+    )
+    request = VideoInferenceRequest.model_validate(
+        {
+            "videoPath": str(video_path),
+            "selection": {"bbox": [10, 20, 60, 70]},
+            "videoConfig": {"targetFps": 5.0, "maxFrames": 3},
+            "assetConfig": {
+                "assetId": "user_bundle",
+                "actionType": "smash",
+                "handedness": "right",
+            },
+            "storage": {
+                "mode": "direct_upload",
+                "prefix": "unit-tests",
+                "uploads": {
+                    "skeleton": {
+                        "putUrl": "https://uploads.example/skeleton.npz",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz",
+                        "contentType": "application/octet-stream",
+                    },
+                    "render": {
+                        "putUrl": "https://uploads.example/render.npz",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/render.npz",
+                        "contentType": "application/octet-stream",
+                    },
+                    "metadata": {
+                        "putUrl": "https://uploads.example/metadata.json",
+                        "fetchUrl": "r2://test-bucket/technique/user-assets/user_bundle/metadata.json",
+                        "contentType": "application/json",
+                    },
+                },
+            },
+        }
+    )
+
+    with pytest.raises(TimeoutError, match="Timed out uploading generated artifact"):
+        _run_video_inference_sync(
+            app.state.service_state,
+            request,
+            TechniqueTraceContext(trace_id="tech-trace-unit-test"),
+        )
+
+    stages = [stage for stage, _meta in trace_events]
+    assert "direct_upload_started" in stages
+    assert "artifact_upload_failed" in stages
+    upload_failed_meta = next(
+        meta for stage, meta in trace_events if stage == "artifact_upload_failed"
+    )
+    assert upload_failed_meta is not None
+    assert upload_failed_meta["artifactType"] == "skeleton"
+    assert upload_failed_meta["fetchUrl"] == (
+        "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz"
+    )
+
+
 def test_run_video_inference_sync_maps_remote_fetch_failures_to_bad_gateway(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
