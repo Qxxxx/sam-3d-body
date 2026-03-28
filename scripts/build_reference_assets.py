@@ -28,11 +28,11 @@ _DEFAULT_CHECKPOINT_DIR = (
 _DEFAULT_CF_BACKEND_DIR = Path(__file__).resolve().parents[2] / "cf-backend"
 _DEFAULT_R2_BUCKET_BY_ENV = {
     "staging": "duolian-storage-staging",
-    "production": "duolian-storage",
+    "production": "duolian-storage-prod",
 }
 _DEFAULT_D1_DATABASE_BY_ENV = {
     "staging": "duolian-db-staging",
-    "production": "duolian-db",
+    "production": "duolian-db-prod",
 }
 
 

@@ -501,8 +501,8 @@ def test_publish_assets_skips_render_column_when_db_not_migrated(
     )
     upsert_sql = next(token for token in upsert_command if "INSERT INTO technique_reference_assets" in token)
     assert "render_asset_url" not in upsert_sql
-    assert "r2://duolian-storage/refs/clear/clear_ref_001/clear_ref_001.npz" in upsert_sql
-    assert "r2://duolian-storage/source-videos/clear/clear_ref_001/source.mp4" in upsert_sql
+    assert "r2://duolian-storage-prod/refs/clear/clear_ref_001/clear_ref_001.npz" in upsert_sql
+    assert "r2://duolian-storage-prod/source-videos/clear/clear_ref_001/source.mp4" in upsert_sql
 
 
 def test_publish_assets_keeps_existing_source_video_url_when_upload_is_skipped(
