@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pytorch_lightning.utilities import rank_zero_only
+try:
+    from pytorch_lightning.utilities import rank_zero_only
+except ModuleNotFoundError:
+    # Lightweight CI paths import this module without model dependencies.
+    def rank_zero_only(fn):  # type: ignore[no-redef]
+        return fn
 
 
 _LOGGER_NAMES = ("sam3d", "sam_3d_body")
