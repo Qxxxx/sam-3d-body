@@ -184,6 +184,8 @@ def test_parse_args_defaults_target_fps_to_30() -> None:
     )
 
     assert args.target_fps == 30.0
+    assert args.detector_name == "vitdet"
+    assert args.detector_path == ""
 
 
 def test_parse_args_uploads_source_video_by_default() -> None:
@@ -242,6 +244,101 @@ def test_load_entry_rejects_directory_video_path(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="must point to a file"):
         script._load_entry(args)
+
+
+def test_load_estimator_wires_human_detector(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_load_sam_3d_body(*, checkpoint_path: str, device: str, mhr_path: str) -> tuple[str, str]:
+        captured["load"] = {
+            "checkpoint_path": checkpoint_path,
+            "device": device,
+            "mhr_path": mhr_path,
+        }
+        return "model", "cfg"
+
+    class _FakeDetector:
+        def __init__(self, *, name: str, device: str, path: str) -> None:
+            captured["detector"] = {
+                "name": name,
+                "device": device,
+                "path": path,
+            }
+
+    class _FakeFovEstimator:
+        def __init__(self, *, name: str, device: str, path: str) -> None:
+            captured["fov"] = {
+                "name": name,
+                "device": device,
+                "path": path,
+            }
+
+    class _FakeEstimator:
+        def __init__(
+            self,
+            sam_3d_body_model: Any,
+            model_cfg: Any,
+            human_detector: Any = None,
+            human_segmentor: Any = None,
+            fov_estimator: Any = None,
+        ) -> None:
+            captured["estimator"] = {
+                "model": sam_3d_body_model,
+                "model_cfg": model_cfg,
+                "human_detector": human_detector,
+                "human_segmentor": human_segmentor,
+                "fov_estimator": fov_estimator,
+            }
+
+    monkeypatch.setattr("sam_3d_body.load_sam_3d_body", _fake_load_sam_3d_body)
+    monkeypatch.setattr("sam_3d_body.SAM3DBodyEstimator", _FakeEstimator)
+    monkeypatch.setattr("tools.build_detector.HumanDetector", _FakeDetector)
+    monkeypatch.setattr("tools.build_fov_estimator.FOVEstimator", _FakeFovEstimator)
+
+    args = script.parse_args(
+        [
+            "--video-path",
+            "/tmp/video.mp4",
+            "--output-dir",
+            "/tmp/out",
+            "--action-type",
+            "smash",
+            "--checkpoint-path",
+            "/tmp/model.ckpt",
+            "--mhr-path",
+            "/tmp/mhr.pt",
+            "--device",
+            "cuda",
+            "--detector-name",
+            "vitdet",
+            "--detector-path",
+            "/tmp/detector",
+            "--fov-name",
+            "moge2",
+            "--fov-path",
+            "/tmp/fov",
+        ]
+    )
+
+    script._load_estimator(args)
+
+    assert captured["load"] == {
+        "checkpoint_path": "/tmp/model.ckpt",
+        "device": "cuda",
+        "mhr_path": "/tmp/mhr.pt",
+    }
+    assert captured["detector"] == {
+        "name": "vitdet",
+        "device": "cuda",
+        "path": "/tmp/detector",
+    }
+    assert captured["fov"] == {
+        "name": "moge2",
+        "device": "cuda",
+        "path": "/tmp/fov",
+    }
+    assert captured["estimator"]["human_detector"].__class__ is _FakeDetector
+    assert captured["estimator"]["fov_estimator"].__class__ is _FakeFovEstimator
 
 
 def test_main_builds_single_video_assets_and_summary(

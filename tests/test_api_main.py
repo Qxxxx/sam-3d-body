@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from api.config import ApiSettings, load_api_settings
 from api.main import (
     TechniqueTraceContext,
+    _build_estimator,
     _emit_inference_failure_event,
     _emit_trace_event,
     _run_video_inference_sync,
@@ -186,12 +187,103 @@ def test_load_api_settings_defaults_artifact_root_to_system_tmp(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.delenv("SAM3DBODY_ARTIFACT_ROOT", raising=False)
+    monkeypatch.delenv("SAM3DBODY_DETECTOR_NAME", raising=False)
+    monkeypatch.delenv("SAM3DBODY_DETECTOR_PATH", raising=False)
 
     settings = load_api_settings()
 
     assert (
         Path(settings.artifact_root) == Path(tempfile.gettempdir()) / "sam3d-body-api"
     )
+    assert settings.detector_name == "vitdet"
+    assert settings.detector_path == ""
+
+
+def test_build_estimator_wires_human_detector(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    captured: dict[str, Any] = {}
+    checkpoint_path = tmp_path / "model.ckpt"
+    mhr_path = tmp_path / "mhr.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    mhr_path.write_bytes(b"mhr")
+
+    def _fake_load_sam_3d_body(*, checkpoint_path: str, device: str, mhr_path: str) -> tuple[str, str]:
+        captured["load"] = {
+            "checkpoint_path": checkpoint_path,
+            "device": device,
+            "mhr_path": mhr_path,
+        }
+        return "model", "cfg"
+
+    class _FakeDetector:
+        def __init__(self, *, name: str, device: str, path: str) -> None:
+            captured["detector"] = {
+                "name": name,
+                "device": device,
+                "path": path,
+            }
+
+    class _FakeFovEstimator:
+        def __init__(self, *, name: str, device: str, path: str) -> None:
+            captured["fov"] = {
+                "name": name,
+                "device": device,
+                "path": path,
+            }
+
+    class _FakeEstimator:
+        def __init__(
+            self,
+            sam_3d_body_model: Any,
+            model_cfg: Any,
+            human_detector: Any = None,
+            human_segmentor: Any = None,
+            fov_estimator: Any = None,
+        ) -> None:
+            captured["estimator"] = {
+                "model": sam_3d_body_model,
+                "model_cfg": model_cfg,
+                "human_detector": human_detector,
+                "human_segmentor": human_segmentor,
+                "fov_estimator": fov_estimator,
+            }
+
+    monkeypatch.setattr("sam_3d_body.load_sam_3d_body", _fake_load_sam_3d_body)
+    monkeypatch.setattr("sam_3d_body.SAM3DBodyEstimator", _FakeEstimator)
+    monkeypatch.setattr("tools.build_detector.HumanDetector", _FakeDetector)
+    monkeypatch.setattr("tools.build_fov_estimator.FOVEstimator", _FakeFovEstimator)
+
+    settings = ApiSettings(
+        checkpoint_path=str(checkpoint_path),
+        mhr_path=str(mhr_path),
+        device="cuda",
+        fov_name="moge2",
+        fov_path="/tmp/fov",
+        artifact_root="/tmp/artifacts",
+        detector_name="vitdet",
+        detector_path="/tmp/detector",
+    )
+
+    _build_estimator(settings)
+
+    assert captured["load"] == {
+        "checkpoint_path": str(checkpoint_path),
+        "device": "cuda",
+        "mhr_path": str(mhr_path),
+    }
+    assert captured["detector"] == {
+        "name": "vitdet",
+        "device": "cuda",
+        "path": "/tmp/detector",
+    }
+    assert captured["fov"] == {
+        "name": "moge2",
+        "device": "cuda",
+        "path": "/tmp/fov",
+    }
+    assert captured["estimator"]["human_detector"].__class__ is _FakeDetector
+    assert captured["estimator"]["fov_estimator"].__class__ is _FakeFovEstimator
 
 
 def test_run_video_inference_sync_returns_asset_manifest_and_local_files(

@@ -87,6 +87,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cuda", help="Inference device.")
     parser.add_argument(
+        "--detector-name",
+        default="vitdet",
+        help="Human detector name. Use empty string to disable detection and fall back to full-frame inference.",
+    )
+    parser.add_argument(
+        "--detector-path",
+        default="",
+        help="Optional path to human detector assets or checkpoint cache.",
+    )
+    parser.add_argument(
         "--fov-name",
         default="moge2",
         help="FOV estimator name. Use empty string to disable FOV estimation.",
@@ -241,6 +251,16 @@ def _load_estimator(args: argparse.Namespace) -> SAM3DBodyEstimator:
         device=args.device,
         mhr_path=args.mhr_path,
     )
+    human_detector = None
+    detector_name = _normalize_optional_str(args.detector_name)
+    if detector_name is not None:
+        from tools.build_detector import HumanDetector
+
+        human_detector = HumanDetector(
+            name=detector_name,
+            device=args.device,
+            path=_normalize_optional_str(args.detector_path) or "",
+        )
     fov_estimator = None
     fov_name = _normalize_optional_str(args.fov_name)
     if fov_name is not None:
@@ -255,6 +275,7 @@ def _load_estimator(args: argparse.Namespace) -> SAM3DBodyEstimator:
     return SAM3DBodyEstimator(
         model,
         model_cfg,
+        human_detector=human_detector,
         fov_estimator=fov_estimator,
     )
 

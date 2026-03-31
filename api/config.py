@@ -20,6 +20,8 @@ class ApiSettings:
     fov_name: str
     fov_path: str
     artifact_root: str
+    detector_name: str = "vitdet"
+    detector_path: str = ""
     log_level: str = "INFO"
     eager_model_load: bool = False
     technique_trace_ingest_url: str | None = None
@@ -60,6 +62,9 @@ def load_api_settings() -> ApiSettings:
             "SAM3DBODY_ARTIFACT_ROOT",
             str(_DEFAULT_ARTIFACT_ROOT),
         ),
+        detector_name=os.getenv("SAM3DBODY_DETECTOR_NAME", "vitdet").strip()
+        or "vitdet",
+        detector_path=os.getenv("SAM3DBODY_DETECTOR_PATH", "").strip(),
         log_level=os.getenv("SAM3DBODY_LOG_LEVEL", "INFO").strip() or "INFO",
         eager_model_load=_read_bool_env("SAM3DBODY_EAGER_MODEL_LOAD", False),
         technique_trace_ingest_url=(

@@ -152,6 +152,17 @@ class _DummyEstimator:
         ]
 
 
+class _MovingBBoxEstimator(_DummyEstimator):
+    def process_one_image(self, frame_rgb: np.ndarray, **kwargs: Any) -> list[dict[str, Any]]:
+        outputs = super().process_one_image(frame_rgb, **kwargs)
+        frame_idx = self.call_count - 1
+        outputs[0]["bbox"] = np.array(
+            [10.0 + frame_idx * 4.0, 12.0, 30.0 + frame_idx * 4.0, 42.0],
+            dtype=np.float32,
+        )
+        return outputs
+
+
 def test_discover_reference_videos_filters_and_sorts(tmp_path: Path) -> None:
     video_dir = tmp_path / "videos"
     video_dir.mkdir(parents=True)
@@ -609,3 +620,33 @@ def test_build_reference_asset_bundle_writes_cropped_follow_video(tmp_path: Path
     assert frame.shape[1] > 0
     assert frame.shape[0] % 2 == 0
     assert frame.shape[1] % 2 == 0
+
+
+def test_build_reference_asset_bundle_cropped_video_uses_smoothed_output_track(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "tracked.mp4"
+    _write_dummy_video(video, fps=10.0, num_frames=6)
+
+    bundle = build_reference_asset_bundle(
+        ReferenceVideoEntry(
+            video_path=video,
+            action_type="smash",
+            asset_role="user",
+            reference_id="tracked_user",
+            selection_bbox_xyxy=(0.0, 0.0, 100.0, 70.0),
+        ),
+        estimator=_MovingBBoxEstimator(),  # type: ignore[arg-type]
+        output_dir=tmp_path / "out",
+        cropped_video_output_path=tmp_path / "out" / "tracked_source.mp4",
+        overwrite=True,
+    )
+
+    assert bundle.cropped_video_path is not None
+    capture = cv2.VideoCapture(str(bundle.cropped_video_path))
+    try:
+        assert capture.isOpened()
+        assert int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) == 24
+        assert int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 36
+    finally:
+        capture.release()

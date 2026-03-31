@@ -81,6 +81,7 @@ class TechniqueTraceContext:
 
 def _build_estimator(settings: ApiSettings) -> "SAM3DBodyEstimator":
     from tools.build_fov_estimator import FOVEstimator
+    from tools.build_detector import HumanDetector
     from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body
 
     checkpoint_path = Path(settings.checkpoint_path)
@@ -102,9 +103,18 @@ def _build_estimator(settings: ApiSettings) -> "SAM3DBodyEstimator":
         device=settings.device,
         path=settings.fov_path.strip(),
     )
+    human_detector = None
+    detector_name = settings.detector_name.strip()
+    if detector_name:
+        human_detector = HumanDetector(
+            name=detector_name,
+            device=settings.device,
+            path=settings.detector_path.strip(),
+        )
     return SAM3DBodyEstimator(
         model,
         model_cfg,
+        human_detector=human_detector,
         fov_estimator=fov_estimator,
     )
 
@@ -296,6 +306,7 @@ def _ensure_estimator(
                     "mhrPath": state.settings.mhr_path,
                     "device": state.settings.device,
                     "fovName": state.settings.fov_name,
+                    "detectorName": state.settings.detector_name,
                 },
             )
             state.estimator = _build_estimator(state.settings)
@@ -308,6 +319,7 @@ def _ensure_estimator(
                 meta={
                     "device": state.settings.device,
                     "fovName": state.settings.fov_name,
+                    "detectorName": state.settings.detector_name,
                 },
             )
         except Exception as exc:  # pragma: no cover - depends on runtime environment
@@ -325,6 +337,7 @@ def _ensure_estimator(
                     "mhrPath": state.settings.mhr_path,
                     "device": state.settings.device,
                     "fovName": state.settings.fov_name,
+                    "detectorName": state.settings.detector_name,
                 },
             )
             raise HTTPException(

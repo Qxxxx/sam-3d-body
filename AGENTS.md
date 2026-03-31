@@ -23,6 +23,7 @@ Runtime boundary:
 
 - `sam-3d-body` is Linux-only for local development, tests, and inference.
 - The expected development environment is `conda activate sam_3d_body`.
+- Run all Python scripts, CLIs, tests, and service entrypoints for this module inside the `sam_3d_body` conda environment. Do not rely on the system Python for `sam-3d-body` tasks; use `conda activate sam_3d_body` or `conda run -n sam_3d_body ...`.
 
 Validation lanes:
 
