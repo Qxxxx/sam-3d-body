@@ -8,6 +8,7 @@ from typing import Any
 import cv2
 import numpy as np
 import pytest
+import sam_3d_body
 
 from scripts import build_reference_assets as script
 
@@ -290,8 +291,16 @@ def test_load_estimator_wires_human_detector(monkeypatch: Any) -> None:
                 "fov_estimator": fov_estimator,
             }
 
-    monkeypatch.setattr("sam_3d_body.load_sam_3d_body", _fake_load_sam_3d_body)
-    monkeypatch.setattr("sam_3d_body.SAM3DBodyEstimator", _FakeEstimator)
+    monkeypatch.setitem(
+        sam_3d_body.__dict__,
+        "load_sam_3d_body",
+        _fake_load_sam_3d_body,
+    )
+    monkeypatch.setitem(
+        sam_3d_body.__dict__,
+        "SAM3DBodyEstimator",
+        _FakeEstimator,
+    )
     monkeypatch.setattr("tools.build_detector.HumanDetector", _FakeDetector)
     monkeypatch.setattr("tools.build_fov_estimator.FOVEstimator", _FakeFovEstimator)
 
