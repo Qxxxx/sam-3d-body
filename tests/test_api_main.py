@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import time
+from types import ModuleType
 from typing import Any
 
 import cv2
@@ -260,8 +262,12 @@ def test_build_estimator_wires_human_detector(
         "SAM3DBodyEstimator",
         _FakeEstimator,
     )
-    monkeypatch.setattr("tools.build_detector.HumanDetector", _FakeDetector)
-    monkeypatch.setattr("tools.build_fov_estimator.FOVEstimator", _FakeFovEstimator)
+    fake_detector_module = ModuleType("tools.build_detector")
+    fake_detector_module.HumanDetector = _FakeDetector
+    fake_fov_module = ModuleType("tools.build_fov_estimator")
+    fake_fov_module.FOVEstimator = _FakeFovEstimator
+    monkeypatch.setitem(sys.modules, "tools.build_detector", fake_detector_module)
+    monkeypatch.setitem(sys.modules, "tools.build_fov_estimator", fake_fov_module)
 
     settings = ApiSettings(
         checkpoint_path=str(checkpoint_path),

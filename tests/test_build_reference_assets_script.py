@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
+from types import ModuleType
 from typing import Any
 
 import cv2
@@ -301,8 +303,12 @@ def test_load_estimator_wires_human_detector(monkeypatch: Any) -> None:
         "SAM3DBodyEstimator",
         _FakeEstimator,
     )
-    monkeypatch.setattr("tools.build_detector.HumanDetector", _FakeDetector)
-    monkeypatch.setattr("tools.build_fov_estimator.FOVEstimator", _FakeFovEstimator)
+    fake_detector_module = ModuleType("tools.build_detector")
+    fake_detector_module.HumanDetector = _FakeDetector
+    fake_fov_module = ModuleType("tools.build_fov_estimator")
+    fake_fov_module.FOVEstimator = _FakeFovEstimator
+    monkeypatch.setitem(sys.modules, "tools.build_detector", fake_detector_module)
+    monkeypatch.setitem(sys.modules, "tools.build_fov_estimator", fake_fov_module)
 
     args = script.parse_args(
         [
