@@ -1106,14 +1106,6 @@ def _render_cropped_follow_video_with_ffmpeg(
     if ffmpeg_command is None:
         return False
 
-    output_fps = None
-    if source_stream is not None:
-        raw_output_fps = source_stream.get("avg_frame_rate")
-        if isinstance(raw_output_fps, str):
-            normalized = raw_output_fps.strip()
-            if normalized and normalized != "0/0":
-                output_fps = normalized
-
     base_args = [
         ffmpeg_command,
         "-hide_banner",
@@ -1127,8 +1119,6 @@ def _render_cropped_follow_video_with_ffmpeg(
         filter_expression,
         "-an",
     ]
-    if output_fps is not None:
-        base_args.extend(["-r", output_fps])
     base_args.extend(_build_color_metadata_args(source_stream))
 
     for encode_args in _build_ffmpeg_video_encode_candidates(source_stream):

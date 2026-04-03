@@ -62,6 +62,22 @@ def _probe_video_stream(path: Path) -> dict[str, Any]:
     return payload["streams"][0]
 
 
+def _count_decodable_frames(path: Path) -> int:
+    capture = cv2.VideoCapture(str(path))
+    try:
+        if not capture.isOpened():
+            raise RuntimeError(f"Failed to open video: {path}")
+        count = 0
+        while True:
+            ok, _frame = capture.read()
+            if not ok:
+                break
+            count += 1
+        return count
+    finally:
+        capture.release()
+
+
 def _write_dummy_video(path: Path, fps: float, num_frames: int) -> None:
     width, height = 120, 80
     writer = cv2.VideoWriter(
@@ -522,8 +538,8 @@ def test_save_cropped_follow_video_preserves_hdr_stream_for_actual_crop_img_1966
 
     extraction = ReferenceExtractionResult(
         sequence=SkeletonSequence(
-            keypoints_3d=np.zeros((1, 1, 3), dtype=np.float32),
-            timestamps=np.array([0.0], dtype=np.float32),
+            keypoints_3d=np.zeros((2, 1, 3), dtype=np.float32),
+            timestamps=np.array([0.0, 1.0], dtype=np.float32),
         ),
         selected_outputs=[
             {
@@ -531,9 +547,15 @@ def test_save_cropped_follow_video_preserves_hdr_stream_for_actual_crop_img_1966
                     [200.0, 300.0, 500.0, 1300.0],
                     dtype=np.float32,
                 )
-            }
+            },
+            {
+                "bbox": np.array(
+                    [200.0, 300.0, 500.0, 1300.0],
+                    dtype=np.float32,
+                )
+            },
         ],
-        frame_indices=np.array([0], dtype=np.int32),
+        frame_indices=np.array([0, 100], dtype=np.int32),
         source_fps=source_fps,
         image_size_hw=(frame_height, frame_width),
     )
@@ -557,7 +579,44 @@ def test_save_cropped_follow_video_preserves_hdr_stream_for_actual_crop_img_1966
     assert output_stream["color_range"] == "tv"
     assert output_stream["width"] == 420
     assert output_stream["height"] == 1600
-    assert output_stream["avg_frame_rate"] == "1845/37"
+    output_frame_count = _count_decodable_frames(output_path)
+    assert output_frame_count > int(np.max(extraction.frame_indices))
+
+
+def test_save_cropped_follow_video_keeps_output_frames_addressable_for_actual_crop(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "tracked.mp4"
+    _write_dummy_video(video, fps=10.0, num_frames=8)
+
+    extraction = ReferenceExtractionResult(
+        sequence=SkeletonSequence(
+            keypoints_3d=np.zeros((2, 1, 3), dtype=np.float32),
+            timestamps=np.array([0.0, 0.7], dtype=np.float32),
+        ),
+        selected_outputs=[
+            {
+                "bbox": np.array([10.0, 20.0, 60.0, 50.0], dtype=np.float32),
+            },
+            {
+                "bbox": np.array([10.0, 20.0, 60.0, 50.0], dtype=np.float32),
+            },
+        ],
+        frame_indices=np.array([0, 7], dtype=np.int32),
+        source_fps=10.0,
+        image_size_hw=(80, 120),
+    )
+
+    output_path = tmp_path / "out" / "tracked_source.mp4"
+    save_cropped_follow_video(
+        video_path=video,
+        extraction=extraction,
+        video_config=VideoExtractionConfig(),
+        output_path=output_path,
+    )
+
+    assert output_path.exists()
+    assert _count_decodable_frames(output_path) > int(np.max(extraction.frame_indices))
 
 
 def test_build_reference_assets_requires_phase_annotations_for_reference_assets(
