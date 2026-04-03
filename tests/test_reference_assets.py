@@ -10,6 +10,7 @@ import pytest
 
 from sam_3d_body.reference_assets import (
     ReferenceVideoEntry,
+    _smooth_track_1d,
     build_reference_asset_bundle,
     build_reference_assets,
     discover_reference_videos,
@@ -160,6 +161,13 @@ class _MovingBBoxEstimator(_DummyEstimator):
             [10.0 + frame_idx * 4.0, 12.0, 30.0 + frame_idx * 4.0, 42.0],
             dtype=np.float32,
         )
+        return outputs
+
+
+class _LargeBBoxEstimator(_DummyEstimator):
+    def process_one_image(self, frame_rgb: np.ndarray, **kwargs: Any) -> list[dict[str, Any]]:
+        outputs = super().process_one_image(frame_rgb, **kwargs)
+        outputs[0]["bbox"] = np.array([2.0, 2.0, 118.0, 78.0], dtype=np.float32)
         return outputs
 
 
@@ -646,7 +654,48 @@ def test_build_reference_asset_bundle_cropped_video_uses_smoothed_output_track(
     capture = cv2.VideoCapture(str(bundle.cropped_video_path))
     try:
         assert capture.isOpened()
-        assert int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) == 24
-        assert int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 36
+        assert int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) == 28
+        assert int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 48
+    finally:
+        capture.release()
+
+
+def test_smooth_track_reduces_single_frame_center_jump() -> None:
+    centers = np.array([20.0, 24.0, 60.0, 28.0, 32.0], dtype=np.float32)
+
+    smoothed = _smooth_track_1d(centers, outlier_window=3, motion_window=5)
+
+    assert smoothed.shape == centers.shape
+    assert float(np.max(np.abs(np.diff(smoothed)))) < float(np.max(np.abs(np.diff(centers))))
+    assert abs(float(smoothed[2] - smoothed[1])) < abs(float(centers[2] - centers[1]))
+    assert abs(float(smoothed[3] - smoothed[2])) < abs(float(centers[3] - centers[2]))
+
+
+def test_build_reference_asset_bundle_uses_full_frame_when_padded_crop_exceeds_source(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "full_frame.mp4"
+    _write_dummy_video(video, fps=10.0, num_frames=4)
+
+    bundle = build_reference_asset_bundle(
+        ReferenceVideoEntry(
+            video_path=video,
+            action_type="smash",
+            asset_role="user",
+            reference_id="full_frame_user",
+            selection_bbox_xyxy=(0.0, 0.0, 120.0, 80.0),
+        ),
+        estimator=_LargeBBoxEstimator(),  # type: ignore[arg-type]
+        output_dir=tmp_path / "out",
+        cropped_video_output_path=tmp_path / "out" / "full_frame_source.mp4",
+        overwrite=True,
+    )
+
+    assert bundle.cropped_video_path is not None
+    capture = cv2.VideoCapture(str(bundle.cropped_video_path))
+    try:
+        assert capture.isOpened()
+        assert int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) == 120
+        assert int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 80
     finally:
         capture.release()

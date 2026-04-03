@@ -676,6 +676,34 @@ def _rolling_median_1d(values: np.ndarray, window_size: int = 5) -> np.ndarray:
     return smoothed
 
 
+def _moving_average_1d(values: np.ndarray, window_size: int = 9) -> np.ndarray:
+    if values.ndim != 1:
+        raise ValueError("values must be a 1D array")
+    if values.size <= 1 or window_size <= 1:
+        return values.astype(np.float32, copy=True)
+
+    radius = max(0, window_size // 2)
+    kernel_size = radius * 2 + 1
+    if kernel_size <= 1:
+        return values.astype(np.float32, copy=True)
+
+    padded = np.pad(values.astype(np.float32, copy=False), (radius, radius), mode="edge")
+    kernel = np.full(kernel_size, 1.0 / float(kernel_size), dtype=np.float32)
+    return np.convolve(padded, kernel, mode="valid").astype(np.float32)
+
+
+def _smooth_track_1d(
+    values: np.ndarray,
+    *,
+    outlier_window: int = 5,
+    motion_window: int = 9,
+) -> np.ndarray:
+    # First reject detector spikes, then smooth the remaining motion so the crop
+    # center glides frame-to-frame instead of stepping between medians.
+    filtered = _rolling_median_1d(values, outlier_window)
+    return _moving_average_1d(filtered, motion_window)
+
+
 def _force_even_size(size: int, maximum: int) -> int:
     clamped = max(2, min(size, maximum))
     if clamped % 2 == 1:
@@ -692,8 +720,10 @@ def _force_even_size(size: int, maximum: int) -> int:
 def _build_smoothed_crop_track(
     extraction: ReferenceExtractionResult,
     *,
-    padding_ratio: float = 0.15,
-    smoothing_window: int = 5,
+    horizontal_padding_ratio: float = 0.20,
+    vertical_padding_ratio: float = 0.30,
+    outlier_window: int = 5,
+    motion_window: int = 9,
 ) -> tuple[np.ndarray, np.ndarray, int, int]:
     if not extraction.selected_outputs:
         raise ValueError("No selected outputs available for cropped video generation")
@@ -710,18 +740,35 @@ def _build_smoothed_crop_track(
     x2 = bbox_xyxy[:, 2]
     y2 = bbox_xyxy[:, 3]
 
-    center_x = _rolling_median_1d((x1 + x2) * 0.5, smoothing_window)
-    center_y = _rolling_median_1d((y1 + y2) * 0.5, smoothing_window)
-    widths = _rolling_median_1d(x2 - x1, smoothing_window)
-    heights = _rolling_median_1d(y2 - y1, smoothing_window)
+    center_x = _smooth_track_1d(
+        (x1 + x2) * 0.5,
+        outlier_window=outlier_window,
+        motion_window=motion_window,
+    )
+    center_y = _smooth_track_1d(
+        (y1 + y2) * 0.5,
+        outlier_window=outlier_window,
+        motion_window=motion_window,
+    )
+    widths = _rolling_median_1d(x2 - x1, outlier_window)
+    heights = _rolling_median_1d(y2 - y1, outlier_window)
 
     image_height, image_width = extraction.image_size_hw
+    padded_width = int(
+        np.ceil(float(np.max(widths)) * (1.0 + horizontal_padding_ratio * 2.0))
+    )
+    padded_height = int(
+        np.ceil(float(np.max(heights)) * (1.0 + vertical_padding_ratio * 2.0))
+    )
+    if padded_width >= image_width or padded_height >= image_height:
+        return center_x, center_y, image_width, image_height
+
     crop_width = _force_even_size(
-        int(np.ceil(float(np.max(widths)) * (1.0 + padding_ratio))),
+        padded_width,
         image_width,
     )
     crop_height = _force_even_size(
-        int(np.ceil(float(np.max(heights)) * (1.0 + padding_ratio))),
+        padded_height,
         image_height,
     )
     return center_x, center_y, crop_width, crop_height
