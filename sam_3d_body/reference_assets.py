@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -792,6 +794,364 @@ def _resolve_crop_bounds(
     return x1, y1, x2, y2
 
 
+def _copy_video_stream_without_reencode(
+    *,
+    video_path: str | Path,
+    output_path: str | Path,
+) -> bool:
+    ffmpeg_command = shutil.which("ffmpeg")
+    if ffmpeg_command is None:
+        return False
+
+    result = subprocess.run(
+        [
+            ffmpeg_command,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(video_path),
+            "-map",
+            "0:v:0",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=120,
+    )
+    return result.returncode == 0 and Path(output_path).exists()
+
+
+def _probe_video_stream(video_path: str | Path) -> dict[str, Any] | None:
+    ffprobe_command = shutil.which("ffprobe")
+    if ffprobe_command is None:
+        return None
+
+    result = subprocess.run(
+        [
+            ffprobe_command,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt,color_space,color_transfer,color_primaries,color_range,width,height,avg_frame_rate",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return None
+
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    streams = payload.get("streams")
+    if not isinstance(streams, list) or not streams:
+        return None
+    stream = streams[0]
+    return stream if isinstance(stream, dict) else None
+
+
+def _format_ffmpeg_number(value: float | int) -> str:
+    if isinstance(value, int):
+        return str(value)
+    formatted = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    return formatted or "0"
+
+
+def _escape_ffmpeg_expression(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(",", "\\,")
+
+
+def _build_piecewise_linear_expression(
+    *,
+    frame_indices: np.ndarray,
+    values: np.ndarray,
+) -> str:
+    frames = np.asarray(frame_indices, dtype=np.int32).reshape(-1)
+    samples = np.asarray(values, dtype=np.float32).reshape(-1)
+    if frames.size == 0 or samples.size == 0 or frames.size != samples.size:
+        raise ValueError("frame_indices and values must be non-empty arrays with matching lengths")
+
+    expression = _format_ffmpeg_number(float(samples[-1]))
+    for index in range(samples.size - 2, -1, -1):
+        left_frame = int(frames[index])
+        right_frame = int(frames[index + 1])
+        left_value = float(samples[index])
+        right_value = float(samples[index + 1])
+        if right_frame <= left_frame:
+            expression = _format_ffmpeg_number(left_value)
+            continue
+
+        delta_value = right_value - left_value
+        segment_expression = (
+            f"({_format_ffmpeg_number(left_value)}+"
+            f"((n-{left_frame})*({_format_ffmpeg_number(delta_value)})/{right_frame - left_frame}))"
+        )
+        expression = f"if(lte(n,{right_frame}),{segment_expression},{expression})"
+
+    first_frame = int(frames[0])
+    if first_frame > 0:
+        expression = (
+            f"if(lt(n,{first_frame}),{_format_ffmpeg_number(float(samples[0]))},{expression})"
+        )
+
+    return expression
+
+
+def _build_crop_origin_expression(
+    *,
+    frame_indices: np.ndarray,
+    center_values: np.ndarray,
+    crop_size: int,
+    frame_size: int,
+) -> str:
+    max_origin = max(0, frame_size - crop_size)
+    if max_origin == 0:
+        return "0"
+
+    center_expression = _build_piecewise_linear_expression(
+        frame_indices=frame_indices,
+        values=center_values,
+    )
+    half_crop = crop_size * 0.5
+    return (
+        f"min(max(floor(({center_expression})-{_format_ffmpeg_number(half_crop)}+0.5),0),{max_origin})"
+    )
+
+
+def _build_cropped_follow_filter(
+    *,
+    frame_indices: np.ndarray,
+    center_x: np.ndarray,
+    center_y: np.ndarray,
+    crop_width: int,
+    crop_height: int,
+    frame_width: int,
+    frame_height: int,
+    start_frame: int,
+    end_frame: int | None,
+) -> str:
+    relative_frame_indices = np.asarray(frame_indices, dtype=np.int32) - int(start_frame)
+    if relative_frame_indices.size == 0:
+        raise ValueError("frame_indices must not be empty for ffmpeg crop rendering")
+
+    trim_parts: list[str] = []
+    if start_frame > 0 or end_frame is not None:
+        trim_expression = f"trim=start_frame={start_frame}"
+        if end_frame is not None:
+            trim_expression += f":end_frame={end_frame + 1}"
+        trim_parts.append(trim_expression)
+    trim_parts.append("setpts=PTS-STARTPTS")
+
+    x_expression = _build_crop_origin_expression(
+        frame_indices=relative_frame_indices,
+        center_values=center_x,
+        crop_size=crop_width,
+        frame_size=frame_width,
+    )
+    y_expression = _build_crop_origin_expression(
+        frame_indices=relative_frame_indices,
+        center_values=center_y,
+        crop_size=crop_height,
+        frame_size=frame_height,
+    )
+
+    trim_parts.append(
+        "crop="
+        f"w={crop_width}:"
+        f"h={crop_height}:"
+        f"x={_escape_ffmpeg_expression(x_expression)}:"
+        f"y={_escape_ffmpeg_expression(y_expression)}:"
+        "exact=1"
+    )
+    return ",".join(trim_parts)
+
+
+def _build_color_metadata_args(source_stream: dict[str, Any] | None) -> list[str]:
+    if source_stream is None:
+        return []
+
+    args: list[str] = []
+    field_map = (
+        ("color_space", "-colorspace"),
+        ("color_primaries", "-color_primaries"),
+        ("color_transfer", "-color_trc"),
+        ("color_range", "-color_range"),
+    )
+    for field_name, argument_name in field_map:
+        raw_value = source_stream.get(field_name)
+        if not isinstance(raw_value, str):
+            continue
+        value = raw_value.strip()
+        if not value or value == "unknown":
+            continue
+        args.extend([argument_name, value])
+    return args
+
+
+def _build_ffmpeg_video_encode_candidates(
+    source_stream: dict[str, Any] | None,
+) -> list[list[str]]:
+    pix_fmt = ""
+    if source_stream is not None:
+        raw_pix_fmt = source_stream.get("pix_fmt")
+        if isinstance(raw_pix_fmt, str):
+            pix_fmt = raw_pix_fmt.strip().lower()
+
+    high_bit_depth = any(token in pix_fmt for token in ("10", "12", "14", "16"))
+
+    candidates: list[list[str]] = []
+    if high_bit_depth:
+        candidates.append(
+            [
+                "-c:v",
+                "hevc_nvenc",
+                "-preset",
+                "p6",
+                "-tune",
+                "hq",
+                "-rc",
+                "vbr",
+                "-cq",
+                "18",
+                "-b:v",
+                "0",
+                "-pix_fmt",
+                "p010le",
+                "-profile:v",
+                "main10",
+                "-tag:v",
+                "hvc1",
+            ]
+        )
+    else:
+        candidates.append(
+            [
+                "-c:v",
+                "hevc_nvenc",
+                "-preset",
+                "p6",
+                "-tune",
+                "hq",
+                "-rc",
+                "vbr",
+                "-cq",
+                "18",
+                "-b:v",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
+                "-profile:v",
+                "main",
+                "-tag:v",
+                "hvc1",
+            ]
+        )
+        candidates.append(
+            [
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p6",
+                "-tune",
+                "hq",
+                "-rc",
+                "vbr",
+                "-cq",
+                "18",
+                "-b:v",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        )
+
+    candidates.append(
+        [
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "2",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    )
+    return candidates
+
+
+def _render_cropped_follow_video_with_ffmpeg(
+    *,
+    video_path: str | Path,
+    output_path: str | Path,
+    filter_expression: str,
+    source_stream: dict[str, Any] | None,
+) -> bool:
+    ffmpeg_command = shutil.which("ffmpeg")
+    if ffmpeg_command is None:
+        return False
+
+    output_fps = None
+    if source_stream is not None:
+        raw_output_fps = source_stream.get("avg_frame_rate")
+        if isinstance(raw_output_fps, str):
+            normalized = raw_output_fps.strip()
+            if normalized and normalized != "0/0":
+                output_fps = normalized
+
+    base_args = [
+        ffmpeg_command,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(video_path),
+        "-vf",
+        filter_expression,
+        "-an",
+    ]
+    if output_fps is not None:
+        base_args.extend(["-r", output_fps])
+    base_args.extend(_build_color_metadata_args(source_stream))
+
+    for encode_args in _build_ffmpeg_video_encode_candidates(source_stream):
+        candidate_args = [
+            *base_args,
+            *encode_args,
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        result = subprocess.run(
+            candidate_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=120,
+        )
+        if result.returncode == 0 and Path(output_path).exists():
+            return True
+
+    return False
+
+
 def save_cropped_follow_video(
     *,
     video_path: str | Path,
@@ -801,9 +1161,22 @@ def save_cropped_follow_video(
 ) -> Path:
     center_x, center_y, crop_width, crop_height = _build_smoothed_crop_track(extraction)
     sampled_frame_indices = extraction.frame_indices.astype(np.float32)
+    image_height, image_width = extraction.image_size_hw
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    if (
+        crop_width == image_width
+        and crop_height == image_height
+        and video_config.start_time_sec <= 0
+        and video_config.end_time_sec is None
+        and _copy_video_stream_without_reencode(
+            video_path=video_path,
+            output_path=path,
+        )
+    ):
+        return path
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -818,6 +1191,32 @@ def save_cropped_follow_video(
         if video_config.end_time_sec is not None
         else None
     )
+    source_stream = _probe_video_stream(video_path)
+    cap.release()
+
+    ffmpeg_filter = _build_cropped_follow_filter(
+        frame_indices=extraction.frame_indices,
+        center_x=center_x,
+        center_y=center_y,
+        crop_width=crop_width,
+        crop_height=crop_height,
+        frame_width=image_width,
+        frame_height=image_height,
+        start_frame=start_frame,
+        end_frame=end_frame,
+    )
+
+    if _render_cropped_follow_video_with_ffmpeg(
+        video_path=video_path,
+        output_path=path,
+        filter_expression=ffmpeg_filter,
+        source_stream=source_stream,
+    ):
+        return path
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Failed to reopen video for fallback cropped output: {video_path}")
 
     writer = cv2.VideoWriter(
         str(path),

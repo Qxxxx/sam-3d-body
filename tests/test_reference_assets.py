@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -10,18 +12,54 @@ import pytest
 
 from sam_3d_body.reference_assets import (
     ReferenceVideoEntry,
+    ReferenceExtractionResult,
     _smooth_track_1d,
     build_reference_asset_bundle,
     build_reference_assets,
     discover_reference_videos,
     load_reference_manifest,
+    save_cropped_follow_video,
 )
+from sam_3d_body.technique_alignment import SkeletonSequence
 from sam_3d_body.video_processor import VideoExtractionConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_IMG_1966_RIGHT_VIDEO = (
     REPO_ROOT / "duolian" / "duolian" / "Resources" / "Videos" / "IMG_1966_right.MOV"
 )
+HAS_FFMPEG = shutil.which("ffmpeg") is not None
+HAS_FFPROBE = shutil.which("ffprobe") is not None
+HAS_NVIDIA_GPU = False
+if shutil.which("nvidia-smi") is not None:
+    _nvidia_smi = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    HAS_NVIDIA_GPU = _nvidia_smi.returncode == 0 and bool(_nvidia_smi.stdout.strip())
+
+
+def _probe_video_stream(path: Path) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt,color_space,color_transfer,color_primaries,color_range,width,height,avg_frame_rate",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    return payload["streams"][0]
 
 
 def _write_dummy_video(path: Path, fps: float, num_frames: int) -> None:
@@ -401,6 +439,125 @@ def test_build_reference_asset_bundle_preserves_all_decodable_frames_for_img_196
     assert asset["videoConfig"]["startTimeSec"] == 0.0
     assert asset["videoConfig"]["endTimeSec"] is None
     assert asset["videoConfig"]["sampleEveryFrame"] is True
+
+
+@pytest.mark.skipif(
+    not GOLDEN_IMG_1966_RIGHT_VIDEO.exists() or not HAS_FFMPEG or not HAS_FFPROBE,
+    reason="Golden IMG_1966_right.MOV fixture or ffmpeg/ffprobe not available",
+)
+def test_save_cropped_follow_video_stream_copies_full_frame_img_1966_right(
+    tmp_path: Path,
+) -> None:
+    capture = cv2.VideoCapture(str(GOLDEN_IMG_1966_RIGHT_VIDEO))
+    try:
+        assert capture.isOpened()
+        frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        source_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    finally:
+        capture.release()
+
+    extraction = ReferenceExtractionResult(
+        sequence=SkeletonSequence(
+            keypoints_3d=np.zeros((1, 1, 3), dtype=np.float32),
+            timestamps=np.array([0.0], dtype=np.float32),
+        ),
+        selected_outputs=[
+            {
+                "bbox": np.array(
+                    [0.0, 0.0, float(frame_width), float(frame_height)],
+                    dtype=np.float32,
+                )
+            }
+        ],
+        frame_indices=np.array([0], dtype=np.int32),
+        source_fps=source_fps,
+        image_size_hw=(frame_height, frame_width),
+    )
+
+    output_path = tmp_path / "out" / "full_frame_source.mp4"
+    save_cropped_follow_video(
+        video_path=GOLDEN_IMG_1966_RIGHT_VIDEO,
+        extraction=extraction,
+        video_config=VideoExtractionConfig(),
+        output_path=output_path,
+    )
+
+    assert output_path.exists()
+
+    original_stream = _probe_video_stream(GOLDEN_IMG_1966_RIGHT_VIDEO)
+    output_stream = _probe_video_stream(output_path)
+    for field in (
+        "codec_name",
+        "pix_fmt",
+        "color_space",
+        "color_transfer",
+        "color_primaries",
+        "color_range",
+        "width",
+        "height",
+        "avg_frame_rate",
+    ):
+        assert output_stream[field] == original_stream[field]
+
+
+@pytest.mark.skipif(
+    not GOLDEN_IMG_1966_RIGHT_VIDEO.exists()
+    or not HAS_FFMPEG
+    or not HAS_FFPROBE
+    or not HAS_NVIDIA_GPU,
+    reason="Golden IMG_1966_right.MOV fixture, ffmpeg/ffprobe, or NVIDIA GPU not available",
+)
+def test_save_cropped_follow_video_preserves_hdr_stream_for_actual_crop_img_1966_right(
+    tmp_path: Path,
+) -> None:
+    capture = cv2.VideoCapture(str(GOLDEN_IMG_1966_RIGHT_VIDEO))
+    try:
+        assert capture.isOpened()
+        frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        source_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    finally:
+        capture.release()
+
+    extraction = ReferenceExtractionResult(
+        sequence=SkeletonSequence(
+            keypoints_3d=np.zeros((1, 1, 3), dtype=np.float32),
+            timestamps=np.array([0.0], dtype=np.float32),
+        ),
+        selected_outputs=[
+            {
+                "bbox": np.array(
+                    [200.0, 300.0, 500.0, 1300.0],
+                    dtype=np.float32,
+                )
+            }
+        ],
+        frame_indices=np.array([0], dtype=np.int32),
+        source_fps=source_fps,
+        image_size_hw=(frame_height, frame_width),
+    )
+
+    output_path = tmp_path / "out" / "cropped_source.mp4"
+    save_cropped_follow_video(
+        video_path=GOLDEN_IMG_1966_RIGHT_VIDEO,
+        extraction=extraction,
+        video_config=VideoExtractionConfig(),
+        output_path=output_path,
+    )
+
+    assert output_path.exists()
+
+    output_stream = _probe_video_stream(output_path)
+    assert output_stream["codec_name"] == "hevc"
+    assert output_stream["pix_fmt"] == "yuv420p10le"
+    assert output_stream["color_space"] == "bt2020nc"
+    assert output_stream["color_transfer"] == "arib-std-b67"
+    assert output_stream["color_primaries"] == "bt2020"
+    assert output_stream["color_range"] == "tv"
+    assert output_stream["width"] == 420
+    assert output_stream["height"] == 1600
+    assert output_stream["avg_frame_rate"] == "1845/37"
 
 
 def test_build_reference_assets_requires_phase_annotations_for_reference_assets(
