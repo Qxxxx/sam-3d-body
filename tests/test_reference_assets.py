@@ -13,6 +13,7 @@ import pytest
 from sam_3d_body.reference_assets import (
     ReferenceVideoEntry,
     ReferenceExtractionResult,
+    _build_smoothed_crop_track,
     _smooth_track_1d,
     build_reference_asset_bundle,
     build_reference_assets,
@@ -76,6 +77,51 @@ def _count_decodable_frames(path: Path) -> int:
         return count
     finally:
         capture.release()
+
+
+def _extract_video_frame_png(
+    *,
+    video_path: Path,
+    output_path: Path,
+    frame_index: int,
+    crop_xywh: tuple[int, int, int, int] | None = None,
+) -> None:
+    filter_parts = [f"select='eq(n,{frame_index})'"]
+    if crop_xywh is not None:
+        crop_x, crop_y, crop_width, crop_height = crop_xywh
+        filter_parts.append(f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}")
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            ",".join(filter_parts),
+            "-frames:v",
+            "1",
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _normalized_image_mae(left_path: Path, right_path: Path) -> float:
+    left = cv2.imread(str(left_path), cv2.IMREAD_UNCHANGED)
+    right = cv2.imread(str(right_path), cv2.IMREAD_UNCHANGED)
+    if left is None or right is None:
+        raise RuntimeError("Failed to read comparison image")
+    if left.shape != right.shape:
+        raise ValueError(f"Image shape mismatch: {left.shape} != {right.shape}")
+
+    max_value = float(np.iinfo(left.dtype).max) if np.issubdtype(left.dtype, np.integer) else 1.0
+    return float(np.mean(np.abs(left.astype(np.float32) - right.astype(np.float32))) / max_value)
 
 
 def _write_dummy_video(path: Path, fps: float, num_frames: int) -> None:
@@ -581,6 +627,88 @@ def test_save_cropped_follow_video_preserves_hdr_stream_for_actual_crop_img_1966
     assert output_stream["height"] == 1600
     output_frame_count = _count_decodable_frames(output_path)
     assert output_frame_count > int(np.max(extraction.frame_indices))
+
+
+@pytest.mark.skipif(
+    not GOLDEN_IMG_1966_RIGHT_VIDEO.exists() or not HAS_FFMPEG,
+    reason="Golden IMG_1966_right.MOV fixture or ffmpeg not available",
+)
+def test_save_cropped_follow_video_matches_direct_crop_without_exact_img_1966_right(
+    tmp_path: Path,
+) -> None:
+    capture = cv2.VideoCapture(str(GOLDEN_IMG_1966_RIGHT_VIDEO))
+    try:
+        assert capture.isOpened()
+        frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        source_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    finally:
+        capture.release()
+
+    extraction = ReferenceExtractionResult(
+        sequence=SkeletonSequence(
+            keypoints_3d=np.zeros((2, 1, 3), dtype=np.float32),
+            timestamps=np.array([0.0, 1.0], dtype=np.float32),
+        ),
+        selected_outputs=[
+            {
+                "bbox": np.array(
+                    [269.5, 712.0, 688.5, 1578.0],
+                    dtype=np.float32,
+                )
+            },
+            {
+                "bbox": np.array(
+                    [269.5, 712.0, 688.5, 1578.0],
+                    dtype=np.float32,
+                )
+            },
+        ],
+        frame_indices=np.array([0, 100], dtype=np.int32),
+        source_fps=source_fps,
+        image_size_hw=(frame_height, frame_width),
+    )
+
+    output_path = tmp_path / "out" / "cropped_source.mp4"
+    save_cropped_follow_video(
+        video_path=GOLDEN_IMG_1966_RIGHT_VIDEO,
+        extraction=extraction,
+        video_config=VideoExtractionConfig(),
+        output_path=output_path,
+    )
+
+    center_x, center_y, crop_width, crop_height = _build_smoothed_crop_track(extraction)
+    comparison_frame_index = 20
+    interpolated_center_x = float(
+        np.interp(comparison_frame_index, extraction.frame_indices.astype(np.float32), center_x)
+    )
+    interpolated_center_y = float(
+        np.interp(comparison_frame_index, extraction.frame_indices.astype(np.float32), center_y)
+    )
+    crop_x = min(
+        max(int(round(interpolated_center_x - crop_width * 0.5)), 0),
+        max(0, frame_width - crop_width),
+    )
+    crop_y = min(
+        max(int(round(interpolated_center_y - crop_height * 0.5)), 0),
+        max(0, frame_height - crop_height),
+    )
+
+    reference_frame_path = tmp_path / "reference_20.png"
+    output_frame_path = tmp_path / "output_20.png"
+    _extract_video_frame_png(
+        video_path=GOLDEN_IMG_1966_RIGHT_VIDEO,
+        output_path=reference_frame_path,
+        frame_index=comparison_frame_index,
+        crop_xywh=(crop_x, crop_y, crop_width, crop_height),
+    )
+    _extract_video_frame_png(
+        video_path=output_path,
+        output_path=output_frame_path,
+        frame_index=comparison_frame_index,
+    )
+
+    assert _normalized_image_mae(reference_frame_path, output_frame_path) < 0.02
 
 
 def test_save_cropped_follow_video_keeps_output_frames_addressable_for_actual_crop(

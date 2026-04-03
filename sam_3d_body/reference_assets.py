@@ -972,13 +972,14 @@ def _build_cropped_follow_filter(
         frame_size=frame_height,
     )
 
+    # Do not enable crop=...:exact=1 here. On rotated 4:2:0 10-bit HDR inputs,
+    # ffmpeg's exact crop path can corrupt frames at chroma-unaligned offsets.
     trim_parts.append(
         "crop="
         f"w={crop_width}:"
         f"h={crop_height}:"
         f"x={_escape_ffmpeg_expression(x_expression)}:"
-        f"y={_escape_ffmpeg_expression(y_expression)}:"
-        "exact=1"
+        f"y={_escape_ffmpeg_expression(y_expression)}"
     )
     return ",".join(trim_parts)
 
