@@ -1,0 +1,13 @@
+{
+  "name": "sam3dbody-alignment-3d-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "serve": "python3 server.py",
+    "test": "node --test web/ground-calibration.test.js"
+  },
+  "dependencies": {
+    "three": "0.185.1"
+  }
+}

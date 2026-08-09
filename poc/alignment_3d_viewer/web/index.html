@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#090b0d" />
+    <title>SAM-3D-Body · 动作对齐实验台</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/vendor/three.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main id="workspace" class="workspace">
+      <section id="videoStage" class="video-stage" aria-label="双视频同步对照">
+        <figure class="video-panel user-video-panel">
+          <video
+            id="userVideo"
+            src="/data/user.mp4"
+            autoplay
+            muted
+            playsinline
+            preload="metadata"
+          ></video>
+          <figcaption>
+            <span class="video-dot user-dot"></span>
+            <span>IMG_3194</span>
+            <small>实际动作</small>
+          </figcaption>
+        </figure>
+        <div class="video-divider" aria-hidden="true"><span>VS</span></div>
+        <figure class="video-panel reference-video-panel">
+          <video
+            id="referenceVideo"
+            src="/data/reference.mp4"
+            autoplay
+            muted
+            playsinline
+            preload="metadata"
+          ></video>
+          <figcaption>
+            <span class="video-dot reference-dot"></span>
+            <span>Fan Zhendong</span>
+            <small>参考动作</small>
+          </figcaption>
+        </figure>
+      </section>
+
+      <canvas id="scene" aria-label="双人三维动作叠加视图"></canvas>
+
+      <header class="topbar">
+        <div class="identity">
+          <span class="signal" aria-hidden="true"></span>
+          <div>
+            <p class="eyebrow">SAM-3D-BODY / ALIGNMENT LAB</p>
+            <h1>动作对齐实验台</h1>
+          </div>
+        </div>
+
+        <div class="analysis-controls" role="group" aria-label="三维分析方式">
+          <button
+            id="threeToggle"
+            class="three-toggle"
+            type="button"
+            role="switch"
+            aria-checked="false"
+          >
+            <span class="toggle-track" aria-hidden="true"><span></span></span>
+            <span>3D</span>
+          </button>
+          <button id="unifyButton" class="unify-button" type="button" disabled>
+            <span aria-hidden="true">◎</span>
+            统一视角
+          </button>
+        </div>
+
+        <div class="status" aria-live="polite">
+          <span id="statusText">正在准备双视频</span>
+          <span class="status-separator">/</span>
+          <span id="frameStatus">—</span>
+        </div>
+      </header>
+
+      <aside class="readout" aria-label="当前动作对齐数据">
+        <p class="readout-kicker">首帧双脚标定 · 同比例</p>
+        <div class="legend-row user-row">
+          <span class="legend-line"></span>
+          <span id="userLabel">实际动作</span>
+        </div>
+        <div class="legend-row reference-row">
+          <span class="legend-line"></span>
+          <span id="referenceLabel">参考动作</span>
+        </div>
+        <dl>
+          <div>
+            <dt>当前帧差异</dt>
+            <dd id="frameError">—</dd>
+          </div>
+          <div>
+            <dt>平均帧差异</dt>
+            <dd id="meanError">—</dd>
+          </div>
+          <div>
+            <dt>匹配算法</dt>
+            <dd id="algorithm">—</dd>
+          </div>
+        </dl>
+        <p class="hint">
+          首帧双脚调平并居中固定基座<br />后续帧保留真实重心起伏与抬脚<br />拖动后两模型绕各自中心同步旋转
+        </p>
+      </aside>
+
+      <section class="transport" aria-label="播放控制">
+        <button
+          id="playButton"
+          class="play-button"
+          type="button"
+          aria-label="播放"
+        >
+          <span id="playIcon">▶</span>
+        </button>
+        <div class="timeline-wrap">
+          <input
+            id="timeline"
+            class="timeline"
+            type="range"
+            min="0"
+            max="1"
+            step="1"
+            value="0"
+            aria-label="动作时间轴"
+          />
+          <div class="time-row">
+            <span id="currentTime">0.00 s</span>
+            <span id="duration">—</span>
+          </div>
+        </div>
+        <div class="mode-note" aria-live="polite">
+          <span class="mode-note-mark"></span>
+          <span id="modeNote">双视频同步播放</span>
+        </div>
+      </section>
+
+      <div id="loadingOverlay" class="loading-overlay">
+        <div class="loading-mark" aria-hidden="true"></div>
+        <p>正在准备双视频</p>
+      </div>
+    </main>
+
+    <script type="module" src="/app.js?v=wireframe-depth-occlusion-7"></script>
+  </body>
+</html>
