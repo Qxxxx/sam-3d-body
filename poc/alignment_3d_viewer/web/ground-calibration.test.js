@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { computeFirstFrameFootSupport } from "./ground-calibration.js";
+import {
+  computeFirstFrameFootSupport,
+  computeFrameFootCenters,
+} from "./ground-calibration.js";
 
 test("separates two feet and returns their sole midpoint", () => {
   const positions = new Float32Array([
@@ -25,6 +28,36 @@ test("separates two feet and returns their sole midpoint", () => {
   assert.deepEqual(
     support.midpoint.map((value) => +value.toFixed(3)),
     [0.05, 0.953, 0.017],
+  );
+  assert.deepEqual(support.footVertexIndices, [
+    [0, 1, 2],
+    [4, 5, 6],
+  ]);
+});
+
+test("tracks the calibrated sole vertices while the hips squat", () => {
+  const positions = new Float32Array([
+    -0.6, 1.1, 0.0, -0.4, 1.1, 0.0, 0.5, 0.9, 0.0, 0.7, 0.9, 0.0, -0.6, 0.7,
+    0.1, -0.4, 0.7, 0.1, 0.5, 0.5, -0.1, 0.7, 0.5, -0.1,
+  ]);
+  const centers = computeFrameFootCenters(positions, 4, 1, [
+    [0, 1],
+    [2, 3],
+  ]);
+
+  assert.deepEqual(
+    centers.map((center) => center.map((value) => +value.toFixed(3))),
+    [
+      [-0.5, 0.7, 0.1],
+      [0.6, 0.5, -0.1],
+    ],
+  );
+});
+
+test("rejects an out-of-range support frame", () => {
+  assert.throws(
+    () => computeFrameFootCenters(new Float32Array(6), 2, 1, [[0], [1]]),
+    /超出网格数据范围/,
   );
 });
 

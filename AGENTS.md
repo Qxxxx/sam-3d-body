@@ -18,22 +18,37 @@ Project shape:
 - FastAPI service in `api/`
 - CLI helpers in `scripts/`
 - deterministic tests in `tests/`
+- Browser-based alignment viewer POC in `poc/alignment_3d_viewer/`
 
 Runtime boundary:
 
-- `sam-3d-body` is Linux-only for local development, tests, and inference.
+- Model inference, service development, and the module validation lanes are
+  Linux-only.
 - The expected development environment is `conda activate sam_3d_body`.
-- Run all Python scripts, CLIs, tests, and service entrypoints for this module inside the `sam_3d_body` conda environment. Do not rely on the system Python for `sam-3d-body` tasks; use `conda activate sam_3d_body` or `conda run -n sam_3d_body ...`.
+- Run model Python scripts, CLIs, tests, and service entrypoints inside the
+  `sam_3d_body` conda environment. Do not rely on the system Python for those
+  tasks; use `conda activate sam_3d_body` or
+  `conda run -n sam_3d_body ...`.
+- Exception: the browser-only alignment viewer can be developed and validated
+  on macOS. Its deterministic exporter/tests require a Python environment with
+  NumPy, but this exception does not make model inference or the module's Linux
+  validation lanes macOS-supported.
 
 Validation lanes:
 
 - Fast/strict baseline: `./scripts/run_linux_pytest.sh tests/test_api_main.py tests/test_build_reference_assets_script.py tests/test_reference_assets.py tests/test_technique_alignment.py tests/test_video_processor.py`
 - Deterministic smoke: `./scripts/run_linux_pytest.sh tests/test_reference_assets_contract.py`
 - Real model smoke stays opt-in and should not block normal PRs.
+- For `poc/alignment_3d_viewer/`, run `npm test` and
+  `python -m unittest -q`. For visual or interaction changes, also verify the
+  running app in a real browser, including synchronized seeking, 3D overlay,
+  unified view, and cleanup when 3D is disabled or the page exits.
 
 Harness expectations:
 
 - Keep public reference-asset outputs schema-driven and versioned.
 - Treat `metadata.json` as a public contract consumed by other modules.
 - Do not add repo-tracked samples with machine-local absolute paths.
+- Keep alignment-viewer generated data, source videos, screenshots, render
+  buffers, and `node_modules` out of Git; preserve its `.gitignore` safeguards.
 - Favor lightweight test/runtime dependencies for CI-compatible paths.

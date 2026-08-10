@@ -20,13 +20,15 @@ once to the current 3D time. In unified mode, two horizontal ground discs stay
 at fixed left and right positions. The first frame is treated as the
 planted-foot calibration pose: mesh topology separates the two lower-leg
 components, both sole contact centers are rigidly leveled, and their midpoint
-is placed at the center of the disc. That single calibration is retained for
-the sequence, so later weight shifts and lifted feet are preserved instead of
-being pulled back to the floor on every frame. A horizontal drag applies the
-same yaw angle to both models around their own calibrated centers while the
-discs remain still. The camera never moves, so the models stay side by side and
-the operation is body rotation rather than camera orbiting. Double-click
-restores the matched view.
+is placed at the center of the disc. Those calibrated sole vertices are tracked
+through the sequence. Each frame receives one shared vertical correction that
+keeps the lower support foot on the ground during a squat; horizontal weight
+shifts and the other foot's relative lift remain intact because neither foot is
+independently snapped to the disc. A horizontal drag applies the same yaw angle
+to both models around their own calibrated centers while the discs remain
+still. The camera never moves, so the models stay side by side and the operation
+is body rotation rather than camera orbiting. Double-click restores the matched
+view.
 
 3D assets and the WebGL context are loaded only after the toggle is enabled.
 Each colored wireframe is rendered after an invisible solid depth prepass, so

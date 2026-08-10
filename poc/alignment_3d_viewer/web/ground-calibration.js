@@ -77,13 +77,13 @@ export function computeFirstFrameFootSupport(positions, indices, vertexCount) {
     );
   }
 
-  const sums = new Map(
-    footRoots.map((root) => [root, { x: 0, y: 0, z: 0, count: 0 }]),
+  const contacts = new Map(
+    footRoots.map((root) => [root, { x: 0, y: 0, z: 0, vertexIndices: [] }]),
   );
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     if (parent[vertex] < 0) continue;
     const root = findRoot(parent, vertex);
-    if (!sums.has(root)) continue;
+    if (!contacts.has(root)) continue;
     const start = vertex * 3;
     if (
       positions[start + 1] <
@@ -91,26 +91,64 @@ export function computeFirstFrameFootSupport(positions, indices, vertexCount) {
     ) {
       continue;
     }
-    const sum = sums.get(root);
-    sum.x += positions[start];
-    sum.y += positions[start + 1];
-    sum.z += positions[start + 2];
-    sum.count += 1;
+    const contact = contacts.get(root);
+    contact.x += positions[start];
+    contact.y += positions[start + 1];
+    contact.z += positions[start + 2];
+    contact.vertexIndices.push(vertex);
   }
 
-  const footCenters = footRoots
+  const feet = footRoots
     .map((root) => {
-      const sum = sums.get(root);
-      if (sum.count === 0) throw new Error("第一帧脚底接触区域为空");
-      return [sum.x / sum.count, sum.y / sum.count, sum.z / sum.count];
+      const contact = contacts.get(root);
+      const count = contact.vertexIndices.length;
+      if (count === 0) throw new Error("第一帧脚底接触区域为空");
+      return {
+        center: [contact.x / count, contact.y / count, contact.z / count],
+        vertexIndices: contact.vertexIndices,
+      };
     })
     .sort((first, second) =>
-      first[0] === second[0] ? first[2] - second[2] : first[0] - second[0],
+      first.center[0] === second.center[0]
+        ? first.center[2] - second.center[2]
+        : first.center[0] - second.center[0],
     );
+  const footCenters = feet.map((foot) => foot.center);
   return {
     footCenters,
+    footVertexIndices: feet.map((foot) => foot.vertexIndices),
     midpoint: footCenters[0].map(
       (value, axis) => (value + footCenters[1][axis]) * 0.5,
     ),
   };
+}
+
+export function computeFrameFootCenters(
+  positions,
+  vertexCount,
+  frame,
+  footVertexIndices,
+) {
+  const frameStart = frame * vertexCount * 3;
+  if (
+    !Number.isInteger(frame) ||
+    frame < 0 ||
+    frameStart + vertexCount * 3 > positions.length
+  ) {
+    throw new Error("脚底支撑帧超出网格数据范围");
+  }
+  return footVertexIndices.map((indices) => {
+    if (indices.length === 0) throw new Error("脚底接触顶点为空");
+    const center = [0, 0, 0];
+    for (const vertex of indices) {
+      if (!Number.isInteger(vertex) || vertex < 0 || vertex >= vertexCount) {
+        throw new Error("脚底接触顶点超出网格范围");
+      }
+      const start = frameStart + vertex * 3;
+      center[0] += positions[start];
+      center[1] += positions[start + 1];
+      center[2] += positions[start + 2];
+    }
+    return center.map((value) => value / indices.length);
+  });
 }

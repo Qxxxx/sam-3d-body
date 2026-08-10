@@ -1,4 +1,7 @@
-import { computeFirstFrameFootSupport } from "./ground-calibration.js";
+import {
+  computeFirstFrameFootSupport,
+  computeFrameFootCenters,
+} from "./ground-calibration.js";
 
 const USER_COLOR = 0x5de2d6;
 const REFERENCE_COLOR = 0xff816d;
@@ -188,6 +191,16 @@ function updateUnifiedMeshFrame(frame) {
   three.referenceMesh.geometry.attributes.position.array.set(
     three.referencePositions.subarray(start, end),
   );
+  updateGroundSupportFrame(
+    three.userGroundCalibration,
+    three.userPositions,
+    frame,
+  );
+  updateGroundSupportFrame(
+    three.referenceGroundCalibration,
+    three.referencePositions,
+    frame,
+  );
   three.userMesh.geometry.attributes.position.needsUpdate = true;
   three.referenceMesh.geometry.attributes.position.needsUpdate = true;
   three.renderedMode = "unified";
@@ -336,9 +349,38 @@ function buildGroundCalibration(
   );
   return {
     footCenter: new THREE.Vector3().fromArray(support.midpoint),
+    footVertexIndices: support.footVertexIndices,
+    currentFootCenters: support.footCenters.map((center) =>
+      new THREE.Vector3().fromArray(center),
+    ),
     levelingQuaternion,
     levelingAngle: footLine.angleTo(horizontalFootLine),
   };
+}
+
+function updateGroundSupportFrame(calibration, positions, frame) {
+  const footCenters = computeFrameFootCenters(
+    positions,
+    state.metadata.mesh.vertexCount,
+    frame,
+    calibration.footVertexIndices,
+  );
+  for (
+    let index = 0;
+    index < calibration.currentFootCenters.length;
+    index += 1
+  ) {
+    calibration.currentFootCenters[index].fromArray(footCenters[index]);
+  }
+}
+
+function lowestFootWorldY(calibration, scale, quaternion, scratch) {
+  let lowestY = Infinity;
+  for (const center of calibration.currentFootCenters) {
+    scratch.copy(center).multiplyScalar(scale).applyQuaternion(quaternion);
+    lowestY = Math.min(lowestY, scratch.y);
+  }
+  return lowestY;
 }
 
 function setBodyFacing(basisValues, frame, baseQuaternion, target) {
@@ -416,12 +458,28 @@ function updateModelTransform() {
   three.referenceFootCenterWorld
     .copy(three.referenceGroundCalibration.footCenter)
     .applyQuaternion(three.referenceGroup.quaternion);
-  three.userGroundTarget
-    .set(-UNIFIED_X, UNIFIED_GROUND_Y, 0)
-    .sub(three.userFootCenterWorld);
-  three.referenceGroundTarget
-    .set(UNIFIED_X, UNIFIED_GROUND_Y, 0)
-    .sub(three.referenceFootCenterWorld);
+  const userLowestFootY = lowestFootWorldY(
+    three.userGroundCalibration,
+    userScale,
+    three.userGroup.quaternion,
+    three.footSupportScratch,
+  );
+  const referenceLowestFootY = lowestFootWorldY(
+    three.referenceGroundCalibration,
+    1,
+    three.referenceGroup.quaternion,
+    three.footSupportScratch,
+  );
+  three.userGroundTarget.set(
+    -UNIFIED_X - three.userFootCenterWorld.x,
+    UNIFIED_GROUND_Y - userLowestFootY,
+    -three.userFootCenterWorld.z,
+  );
+  three.referenceGroundTarget.set(
+    UNIFIED_X - three.referenceFootCenterWorld.x,
+    UNIFIED_GROUND_Y - referenceLowestFootY,
+    -three.referenceFootCenterWorld.z,
+  );
   three.userTransitionOrigin.set(-OVERLAY_TRANSITION_X, 0, 0);
   three.referenceTransitionOrigin.set(OVERLAY_TRANSITION_X, 0, 0);
   three.userGroup.position.lerpVectors(
@@ -981,6 +1039,7 @@ async function initializeThree() {
       referenceGroundCalibration,
       userFootCenterWorld: new THREE.Vector3(),
       referenceFootCenterWorld: new THREE.Vector3(),
+      footSupportScratch: new THREE.Vector3(),
       userGroundTarget: new THREE.Vector3(),
       referenceGroundTarget: new THREE.Vector3(),
       userTransitionOrigin: new THREE.Vector3(),
