@@ -163,6 +163,7 @@ class ReferenceVideoEntry:
     selection_bbox_xyxy: tuple[float, float, float, float] | None = None
     selection_point_px: tuple[float, float] | None = None
     phase_annotations_file: str | Path | None = None
+    phase_annotations_required: bool = True
     video_config: VideoExtractionConfig = field(default_factory=VideoExtractionConfig)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -190,7 +191,11 @@ class ReferenceVideoEntry:
         normalized_phase_annotations_file = _normalize_optional_path(
             self.phase_annotations_file
         )
-        if normalized_phase_annotations_file is None and cleaned_asset_role == "reference":
+        if (
+            normalized_phase_annotations_file is None
+            and cleaned_asset_role == "reference"
+            and self.phase_annotations_required
+        ):
             normalized_phase_annotations_file = _default_phase_annotations_path(self.video_path)
         object.__setattr__(
             self,
@@ -404,6 +409,8 @@ def _load_phase_annotations(
     if entry.asset_role != "reference":
         return []
     if entry.phase_annotations_file is None:
+        if not entry.phase_annotations_required:
+            return []
         raise ValueError(
             f"Reference asset '{entry.reference_id}' requires a phase annotations file."
         )

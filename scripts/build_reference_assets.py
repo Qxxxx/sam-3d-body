@@ -44,6 +44,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, help="Output directory for npz and metadata.")
 
     parser.add_argument("--action-type", required=True, help="Action type for the reference video.")
+    parser.add_argument(
+        "--sport",
+        default="badminton",
+        choices=("badminton", "table_tennis"),
+        help="Sport dimension stored with the published reference asset.",
+    )
     parser.add_argument("--reference-id", default="", help="Optional reference asset ID override.")
     parser.add_argument("--athlete-name", default="", help="Optional athlete name.")
     parser.add_argument("--camera-view", default="", help="Optional camera view.")
@@ -58,6 +64,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--skip-phase-annotations",
+        action="store_true",
+        help="Build a reference without the badminton four-phase annotation contract.",
+    )
+    parser.add_argument(
         "--selection-point-px",
         nargs=2,
         metavar=("X", "Y"),
@@ -66,6 +77,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional pixel coordinate used to select the target person in the video.",
     )
     parser.add_argument("--skeleton-version", default="sam3db_v1", help="Output skeleton version tag.")
+    parser.add_argument(
+        "--pose-asset-path",
+        default="",
+        help="Optional MediaPipe/iOS pose landmark JSON to upload with the reference.",
+    )
+    parser.add_argument(
+        "--pose-version",
+        default="mediapipe_pose_landmarker_heavy_v1",
+        help="Version tag stored for --pose-asset-path.",
+    )
 
     parser.add_argument("--target-fps", type=float, default=30.0)
     parser.add_argument("--start-time-sec", type=float, default=0.0)
@@ -229,6 +250,12 @@ def _load_entry(args: argparse.Namespace) -> ReferenceVideoEntry:
         if args.selection_point_px is not None
         else None
     )
+    phase_annotations_file = _normalize_optional_str(args.phase_annotations_file)
+    if args.sport == "table_tennis" and phase_annotations_file is not None:
+        raise ValueError(
+            "Table-tennis references do not support the legacy badminton phase annotations."
+        )
+
     return ReferenceVideoEntry(
         video_path=video_path,
         action_type=args.action_type,
@@ -237,8 +264,11 @@ def _load_entry(args: argparse.Namespace) -> ReferenceVideoEntry:
         athlete_name=_normalize_optional_str(args.athlete_name),
         camera_view=_normalize_optional_str(args.camera_view),
         handedness=_normalize_optional_str(args.handedness),
+        phase_annotations_required=(
+            args.sport == "badminton" and not args.skip_phase_annotations
+        ),
         selection_point_px=selection_point_px,
-        phase_annotations_file=_normalize_optional_str(args.phase_annotations_file),
+        phase_annotations_file=phase_annotations_file,
         video_config=default_video_config,
     )
 
@@ -500,7 +530,7 @@ def _upsert_reference_asset_row(
     args: argparse.Namespace,
     cf_backend_dir: Path,
     d1_database: str,
-    include_render_asset_url: bool,
+    table_columns: set[str],
     row: dict[str, Any],
 ) -> None:
     columns = [
@@ -543,7 +573,18 @@ def _upsert_reference_asset_row(
         row["created_at"],
         row["updated_at"],
     ]
-    if include_render_asset_url:
+    if "sport" in table_columns:
+        columns.insert(2, "sport")
+        values.insert(2, row["sport"])
+    if "pose_asset_url" in table_columns:
+        insert_index = columns.index("skeleton_asset_url")
+        columns.insert(insert_index, "pose_asset_url")
+        values.insert(insert_index, row.get("pose_asset_url"))
+    if "pose_version" in table_columns:
+        insert_index = columns.index("skeleton_asset_url")
+        columns.insert(insert_index, "pose_version")
+        values.insert(insert_index, row.get("pose_version"))
+    if "render_asset_url" in table_columns:
         columns.insert(7, "render_asset_url")
         values.insert(7, row.get("render_asset_url"))
 
@@ -584,6 +625,24 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
         d1_database=d1_database,
     )
     include_render_asset_url = "render_asset_url" in table_columns
+    include_pose_asset_url = "pose_asset_url" in table_columns
+    include_pose_version = "pose_version" in table_columns
+    if args.sport != "badminton" and "sport" not in table_columns:
+        raise ValueError("technique_reference_assets is missing the sport column.")
+
+    pose_asset_path = (
+        Path(args.pose_asset_path).expanduser().resolve()
+        if args.pose_asset_path.strip()
+        else None
+    )
+    if pose_asset_path is not None:
+        if not include_pose_asset_url or not include_pose_version:
+            raise ValueError(
+                "technique_reference_assets must include pose_asset_url and pose_version "
+                "before publishing --pose-asset-path."
+            )
+        if not pose_asset_path.exists() or not pose_asset_path.is_file():
+            raise FileNotFoundError(f"Pose asset file not found: {pose_asset_path}")
 
     assets = metadata.get("assets")
     if not isinstance(assets, list):
@@ -640,6 +699,36 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
             object_key=skeleton_object_key,
             asset_base_url=args.asset_base_url,
         )
+
+        pose_object_key: str | None = None
+        pose_asset_url: str | None = None
+        if pose_asset_path is not None:
+            pose_object_key = _build_object_key(
+                prefix=args.r2_prefix,
+                action_type=action_type,
+                reference_id=reference_id,
+                filename=pose_asset_path.name,
+            )
+            _run_command(
+                [
+                    "npx",
+                    "wrangler",
+                    "r2",
+                    "object",
+                    "put",
+                    f"{r2_bucket}/{pose_object_key}",
+                    "--file",
+                    str(pose_asset_path),
+                    *_build_wrangler_scope_flags(args),
+                ],
+                cwd=cf_backend_dir,
+            )
+            uploaded_file_count += 1
+            pose_asset_url = _build_asset_url(
+                bucket=r2_bucket,
+                object_key=pose_object_key,
+                asset_base_url=args.asset_base_url,
+            )
 
         render_object_key: str | None = None
         render_asset_url: str | None = None
@@ -703,6 +792,7 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
             "renderAssetFloatDtype": raw_asset.get("renderAssetFloatDtype"),
             "renderAssetFields": raw_asset.get("renderAssetFields"),
             "uploadedObjectKeys": {
+                "pose": pose_object_key,
                 "skeleton": skeleton_object_key,
                 "render": render_object_key,
                 "sourceVideo": source_video_object_key,
@@ -712,14 +802,17 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
             args=args,
             cf_backend_dir=cf_backend_dir,
             d1_database=d1_database,
-            include_render_asset_url=include_render_asset_url,
+            table_columns=table_columns,
             row={
                 "id": row_id,
                 "action_type": action_type,
+                "sport": args.sport,
                 "title": title,
                 "athlete_name": raw_asset.get("athleteName"),
                 "camera_view": raw_asset.get("cameraView"),
                 "handedness": raw_asset.get("handedness") or "unknown",
+                "pose_asset_url": pose_asset_url,
+                "pose_version": args.pose_version if pose_asset_url else None,
                 "skeleton_asset_url": skeleton_asset_url,
                 "render_asset_url": render_asset_url,
                 "source_video_url": source_video_url,
@@ -753,6 +846,9 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
         "upsertedAssetCount": len(published_asset_ids),
         "upsertedAssetIds": published_asset_ids,
         "renderAssetColumnDetected": include_render_asset_url,
+        "poseAssetColumnDetected": include_pose_asset_url,
+        "poseAssetUploadCount": 1 if pose_asset_path is not None else 0,
+        "sport": args.sport,
     }
 
 

@@ -187,6 +187,8 @@ def test_parse_args_defaults_target_fps_to_30() -> None:
     )
 
     assert args.target_fps == 30.0
+    assert args.sport == "badminton"
+    assert args.pose_asset_path == ""
     assert args.detector_name == "vitdet"
     assert args.detector_path == ""
 
@@ -227,7 +229,53 @@ def test_load_entry_defaults_reference_id_from_video_name(tmp_path: Path) -> Non
     assert entry.asset_role == "reference"
     assert entry.video_config.sample_every_frame is True
     assert entry.phase_annotations_file == tmp_path / "Smash Pro 01.json"
+    assert entry.phase_annotations_required is True
     assert entry.selection_point_px is None
+
+
+def test_load_entry_can_skip_badminton_phase_annotations(tmp_path: Path) -> None:
+    video_path = tmp_path / "table-tennis.mp4"
+    video_path.touch()
+    args = script.parse_args(
+        [
+            "--video-path",
+            str(video_path),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--action-type",
+            "table_tennis_backhand_topspin_loop",
+            "--sport",
+            "table_tennis",
+            "--skip-phase-annotations",
+        ]
+    )
+
+    entry = script._load_entry(args)
+
+    assert entry.phase_annotations_required is False
+    assert entry.phase_annotations_file is None
+
+
+def test_load_entry_table_tennis_never_requires_badminton_phases(tmp_path: Path) -> None:
+    video_path = tmp_path / "table-tennis.mp4"
+    video_path.touch()
+    args = script.parse_args(
+        [
+            "--video-path",
+            str(video_path),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--action-type",
+            "table_tennis_backhand_topspin_loop",
+            "--sport",
+            "table_tennis",
+        ]
+    )
+
+    entry = script._load_entry(args)
+
+    assert entry.phase_annotations_required is False
+    assert entry.phase_annotations_file is None
 
 
 def test_load_entry_rejects_directory_video_path(tmp_path: Path) -> None:
@@ -424,9 +472,11 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
     source_video_path = tmp_path / "source.mp4"
     skeleton_path = tmp_path / "smash_ref_001.npz"
     render_path = tmp_path / "smash_ref_001.render.npz"
+    pose_path = tmp_path / "smash_ref_001.pose.json"
     source_video_path.write_bytes(b"source")
     skeleton_path.write_bytes(b"skeleton")
     render_path.write_bytes(b"render")
+    pose_path.write_text("{}", encoding="utf-8")
 
     metadata = {
         "skeletonVersion": "sam3db_v2",
@@ -475,6 +525,9 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
         is_active=1,
         source_video_r2_prefix="refs-source",
         skip_source_video_upload=False,
+        sport="table_tennis",
+        pose_asset_path=str(pose_path),
+        pose_version="mediapipe_pose_landmarker_heavy_v1",
     )
 
     commands: list[list[str]] = []
@@ -488,7 +541,19 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
             and "--json" in command
             and "PRAGMA table_info(technique_reference_assets);" in command
         ):
-            return json.dumps([{"results": [{"name": "id"}, {"name": "render_asset_url"}]}])
+            return json.dumps(
+                [
+                    {
+                        "results": [
+                            {"name": "id"},
+                            {"name": "sport"},
+                            {"name": "pose_asset_url"},
+                            {"name": "pose_version"},
+                            {"name": "render_asset_url"},
+                        ]
+                    }
+                ]
+            )
         return ""
 
     monkeypatch.setattr(script, "_run_command", fake_run)
@@ -496,23 +561,28 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
     summary = script._publish_assets(args, metadata)
 
     assert summary["upsertedAssetCount"] == 1
-    assert summary["uploadFileCount"] == 3
+    assert summary["uploadFileCount"] == 4
     assert summary["sourceVideoUploadCount"] == 1
     assert summary["renderAssetColumnDetected"] is True
     assert summary["cfTarget"] == "remote"
     assert summary["upsertedAssetIds"] == ["smash_smash_ref_001"]
+    assert summary["poseAssetUploadCount"] == 1
+    assert summary["sport"] == "table_tennis"
 
     r2_put_commands = [
         command
         for command in commands
         if len(command) >= 5 and command[:5] == ["npx", "wrangler", "r2", "object", "put"]
     ]
-    assert len(r2_put_commands) == 3
+    assert len(r2_put_commands) == 4
     assert r2_put_commands[0][5] == "duolian-storage-staging/refs/smash/smash_ref_001/smash_ref_001.npz"
     assert r2_put_commands[1][5] == (
-        "duolian-storage-staging/refs/smash/smash_ref_001/smash_ref_001.render.npz"
+        "duolian-storage-staging/refs/smash/smash_ref_001/smash_ref_001.pose.json"
     )
     assert r2_put_commands[2][5] == (
+        "duolian-storage-staging/refs/smash/smash_ref_001/smash_ref_001.render.npz"
+    )
+    assert r2_put_commands[3][5] == (
         "duolian-storage-staging/refs-source/smash/smash_ref_001/source.mp4"
     )
     assert "--remote" in r2_put_commands[0]
@@ -527,6 +597,9 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
     )
     upsert_sql = next(token for token in upsert_command if "INSERT INTO technique_reference_assets" in token)
     assert "render_asset_url" in upsert_sql
+    assert "pose_asset_url" in upsert_sql
+    assert "pose_version" in upsert_sql
+    assert "'table_tennis'" in upsert_sql
     assert "https://assets.example.com/refs/smash/smash_ref_001/smash_ref_001.npz" in upsert_sql
     assert (
         "https://assets.example.com/refs/smash/smash_ref_001/smash_ref_001.render.npz"
@@ -580,6 +653,9 @@ def test_publish_assets_skips_render_column_when_db_not_migrated(
         is_active=1,
         source_video_r2_prefix="source-videos",
         skip_source_video_upload=False,
+        sport="badminton",
+        pose_asset_path="",
+        pose_version="mediapipe_pose_landmarker_heavy_v1",
     )
 
     commands: list[list[str]] = []
@@ -656,6 +732,9 @@ def test_publish_assets_keeps_existing_source_video_url_when_upload_is_skipped(
         priority_score=100,
         is_active=1,
         skip_source_video_upload=True,
+        sport="badminton",
+        pose_asset_path="",
+        pose_version="mediapipe_pose_landmarker_heavy_v1",
     )
 
     commands: list[list[str]] = []
