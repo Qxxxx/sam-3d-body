@@ -1004,6 +1004,62 @@ def test_video_inference_request_defaults_target_fps_to_30() -> None:
     assert payload.video_config.target_fps == 30.0
 
 
+def test_video_inference_request_requires_direct_upload_for_viewer_comparison() -> None:
+    viewer_comparison = {
+        "referenceSkeletonPath": "https://assets.example/reference.npz",
+        "referenceRenderPath": "https://assets.example/reference.render.npz",
+        "referenceLabel": "标准动作",
+        "uploads": {
+            "viewer-data.json": {
+                "putUrl": "https://uploads.example/viewer-data.json",
+                "fetchUrl": "r2://test-bucket/viewer/viewer-data.json",
+                "contentType": "application/json",
+            }
+        },
+    }
+
+    with pytest.raises(ValidationError):
+        VideoInferenceRequest.model_validate(
+            {
+                "videoPath": "/tmp/video.mp4",
+                "viewerComparison": viewer_comparison,
+            }
+        )
+
+    payload = VideoInferenceRequest.model_validate(
+        {
+            "videoPath": "/tmp/video.mp4",
+            "storage": {
+                "mode": "direct_upload",
+                "uploads": {
+                    "skeleton": {
+                        "putUrl": "https://uploads.example/skeleton.npz",
+                        "fetchUrl": "r2://test-bucket/skeleton.npz",
+                        "contentType": "application/octet-stream",
+                    },
+                    "render": {
+                        "putUrl": "https://uploads.example/render.npz",
+                        "fetchUrl": "r2://test-bucket/render.npz",
+                        "contentType": "application/octet-stream",
+                    },
+                    "metadata": {
+                        "putUrl": "https://uploads.example/metadata.json",
+                        "fetchUrl": "r2://test-bucket/metadata.json",
+                        "contentType": "application/json",
+                    },
+                },
+            },
+            "viewerComparison": viewer_comparison,
+        }
+    )
+
+    assert payload.viewer_comparison is not None
+    assert payload.viewer_comparison.reference_label == "标准动作"
+    assert payload.viewer_comparison.uploads["viewer-data.json"].fetch_url == (
+        "r2://test-bucket/viewer/viewer-data.json"
+    )
+
+
 def test_video_inference_request_rejects_legacy_fields() -> None:
     with pytest.raises(ValidationError):
         VideoInferenceRequest.model_validate(

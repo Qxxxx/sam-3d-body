@@ -311,6 +311,11 @@ def _resolve_npz_file(npz_path: str | Path):
     yield local_path
 
 
+# Shared by the alignment-viewer exporter when a production comparison uses a
+# signed R2 download URL for the registered reference render asset.
+resolve_npz_file = _resolve_npz_file
+
+
 def build_alignment_report(
     user_sequence: SkeletonSequence,
     reference_sequence: SkeletonSequence,

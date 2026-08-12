@@ -136,6 +136,25 @@ class VideoAssetStorageModel(BaseModel):
         return self
 
 
+class ViewerComparisonConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    reference_skeleton_path: str = Field(alias="referenceSkeletonPath")
+    reference_render_path: str = Field(alias="referenceRenderPath")
+    reference_label: str = Field(default="标准动作", alias="referenceLabel")
+    uploads: dict[str, VideoAssetUploadTargetModel]
+
+    @model_validator(mode="after")
+    def validate_required_fields(self) -> "ViewerComparisonConfigModel":
+        if not self.reference_skeleton_path.strip():
+            raise ValueError("viewerComparison.referenceSkeletonPath is required.")
+        if not self.reference_render_path.strip():
+            raise ValueError("viewerComparison.referenceRenderPath is required.")
+        if not self.uploads:
+            raise ValueError("viewerComparison.uploads is required.")
+        return self
+
+
 class VideoInferenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -150,6 +169,18 @@ class VideoInferenceRequest(BaseModel):
         alias="assetConfig",
     )
     storage: VideoAssetStorageModel = Field(default_factory=VideoAssetStorageModel)
+    viewer_comparison: ViewerComparisonConfigModel | None = Field(
+        default=None,
+        alias="viewerComparison",
+    )
+
+    @model_validator(mode="after")
+    def validate_viewer_storage(self) -> "VideoInferenceRequest":
+        if self.viewer_comparison is not None and self.storage.mode != "direct_upload":
+            raise ValueError(
+                "viewerComparison requires storage.mode to be direct_upload."
+            )
+        return self
 
 
 class VideoInferenceCallbackConfigModel(BaseModel):
@@ -232,6 +263,14 @@ class VideoInferenceResponse(BaseModel):
     camera: VideoInferenceCameraModel | None = None
     files: GeneratedAssetFilesModel
     manifest: dict[str, Any]
+    viewer_manifest: dict[str, Any] | None = Field(
+        default=None,
+        alias="viewerManifest",
+    )
+    viewer_files: dict[str, GeneratedAssetFileModel] | None = Field(
+        default=None,
+        alias="viewerFiles",
+    )
 
 
 class VideoInferenceJobAcceptedResponse(BaseModel):

@@ -28,6 +28,12 @@ from sam_3d_body.reference_assets import (
     build_reference_assets_metadata,
     save_reference_assets_metadata,
 )
+from sam_3d_body.technique_alignment import (
+    build_alignment_report,
+    load_skeleton_sequence_npz,
+    save_alignment_report_json,
+)
+from poc.alignment_3d_viewer.export_assets import export_assets as export_viewer_assets
 from sam_3d_body.utils.logging import configure_logging, get_pylogger, log_event
 
 from .config import ApiSettings, load_api_settings
@@ -628,6 +634,48 @@ def _run_video_inference_sync(
     )
     metadata_path = output_dir / DEFAULT_METADATA_FILENAME
     save_reference_assets_metadata(manifest, metadata_path)
+
+    viewer_manifest: dict[str, Any] | None = None
+    viewer_output_dir: Path | None = None
+    if payload.viewer_comparison is not None:
+        viewer_output_dir = output_dir / "viewer"
+        alignment_path = viewer_output_dir / "alignment.json"
+        reference_sequence = load_skeleton_sequence_npz(
+            payload.viewer_comparison.reference_skeleton_path
+        )
+        alignment_report = build_alignment_report(
+            bundle.sequence,
+            reference_sequence,
+        )
+        save_alignment_report_json(alignment_report, alignment_path)
+        viewer_manifest = export_viewer_assets(
+            user_render_path=bundle.render_path,
+            reference_render_path=payload.viewer_comparison.reference_render_path,
+            alignment_path=alignment_path,
+            output_dir=viewer_output_dir,
+            user_label="你的动作",
+            reference_label=payload.viewer_comparison.reference_label,
+            fps=float(bundle.asset_metadata["sourceFps"]),
+        )
+
+        viewer_files = viewer_manifest.get("files")
+        if not isinstance(viewer_files, dict):
+            raise ValueError("Generated viewer manifest is missing files.")
+        required_names = {str(value) for value in viewer_files.values()}
+        required_names.add("viewer-data.json")
+        configured_names = set(payload.viewer_comparison.uploads)
+        if configured_names != required_names:
+            raise ValueError(
+                "viewerComparison.uploads must match all generated viewer files."
+            )
+        viewer_manifest["files"] = {
+            key: payload.viewer_comparison.uploads[str(file_name)].fetch_url
+            for key, file_name in viewer_files.items()
+        }
+        (viewer_output_dir / "viewer-data.json").write_text(
+            json.dumps(viewer_manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     _emit_trace_event(
         state.settings,
         trace_context,
@@ -714,6 +762,26 @@ def _run_video_inference_sync(
                 fetch_url=payload.storage.uploads.cropped_video.fetch_url,
                 content_type=payload.storage.uploads.cropped_video.content_type,
             )
+
+        viewer_generated_files: dict[str, GeneratedAssetFileModel] | None = None
+        if payload.viewer_comparison is not None and viewer_output_dir is not None:
+            viewer_generated_files = {}
+            for file_name, upload_target in payload.viewer_comparison.uploads.items():
+                viewer_path = viewer_output_dir / file_name
+                _upload_generated_artifact(
+                    settings=state.settings,
+                    trace_context=trace_context,
+                    asset_id=entry.reference_id or "asset",
+                    artifact_type=f"viewer:{file_name}",
+                    path=viewer_path,
+                    put_url=upload_target.put_url,
+                    fetch_url=upload_target.fetch_url,
+                    content_type=upload_target.content_type,
+                )
+                viewer_generated_files[file_name] = _build_uploaded_file_descriptor(
+                    path=viewer_path,
+                    fetch_url=upload_target.fetch_url,
+                )
         _emit_trace_event(
             state.settings,
             trace_context,
@@ -761,6 +829,7 @@ def _run_video_inference_sync(
             storage_output_dir=payload.storage.output_dir,
         )
     else:
+        viewer_generated_files = None
         generated_files = GeneratedAssetFilesModel(
             skeleton=_build_local_file_descriptor(
                 settings=state.settings,
@@ -818,6 +887,8 @@ def _run_video_inference_sync(
         ),
         files=generated_files,
         manifest=manifest,
+        viewerManifest=viewer_manifest,
+        viewerFiles=viewer_generated_files,
     )
     response_payload = dump_alias_model(response)
     _emit_trace_event(

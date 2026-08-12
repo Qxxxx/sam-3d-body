@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from sam_3d_body.technique_alignment import resolve_npz_file
+
 
 # SAM-3D-Body's persisted 70-keypoint payload follows metadata/mhr70.py.
 # It has no explicit pelvis keypoint, so the canonical root is the hip midpoint.
@@ -195,8 +197,10 @@ def body_basis_frames(
     return bases
 
 
-def _load_render_asset(path: Path) -> dict[str, np.ndarray]:
-    with np.load(path, allow_pickle=False) as data:
+def _load_render_asset(path: str | Path) -> dict[str, np.ndarray]:
+    with resolve_npz_file(path) as resolved_path, np.load(
+        resolved_path, allow_pickle=False
+    ) as data:
         required = (
             "vertices_3d",
             "faces",
