@@ -607,6 +607,8 @@ def test_publish_assets_uploads_and_upserts_with_render_column(
     )
     assert "https://assets.example.com/refs-source/smash/smash_ref_001/source.mp4" in upsert_sql
     assert '"sourceVideo": "refs-source/smash/smash_ref_001/source.mp4"' in upsert_sql
+    assert '"sourceVideoPath": "source.mp4"' in upsert_sql
+    assert str(tmp_path) not in upsert_sql
     assert '"sourceFps": 24.0' in upsert_sql
     assert '"frameIndices": [0, 1, 2, 3]' in upsert_sql
     assert '"phaseAnnotations": [{"id": "preparatory_phase"' in upsert_sql
@@ -780,3 +782,17 @@ def test_publish_assets_keeps_existing_source_video_url_when_upload_is_skipped(
 def test_build_wrangler_scope_flags_local() -> None:
     args = argparse.Namespace(cf_target="local", cf_env="staging")
     assert script._build_wrangler_scope_flags(args) == ["--local", "--env", "staging"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("/Users/example/Downloads/reference.mov", "reference.mov"),
+        (r"C:\\Users\\example\\reference.mov", "reference.mov"),
+        ("relative/reference.mov", "reference.mov"),
+        ("https://assets.example.com/reference.mov", "https://assets.example.com/reference.mov"),
+        (None, None),
+    ],
+)
+def test_public_source_video_metadata_value(value: Any, expected: str | None) -> None:
+    assert script._public_source_video_metadata_value(value) == expected

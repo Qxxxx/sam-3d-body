@@ -436,6 +436,16 @@ def _build_asset_url(*, bucket: str, object_key: str, asset_base_url: str) -> st
     return f"{base}/{object_key}"
 
 
+def _public_source_video_metadata_value(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if "://" in text:
+        return text
+    normalized = text.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1] or None
+
+
 def _render_title(*, template: str, action_type: str, reference_id: str) -> str:
     try:
         rendered = template.format(action_type=action_type, reference_id=reference_id)
@@ -778,7 +788,9 @@ def _publish_assets(args: argparse.Namespace, metadata: dict[str, Any]) -> dict[
             reference_id=reference_id,
         )
         entry_metadata = {
-            "sourceVideoPath": raw_asset.get("sourceVideoPath"),
+            "sourceVideoPath": _public_source_video_metadata_value(
+                raw_asset.get("sourceVideoPath")
+            ),
             "selectionPointPx": raw_asset.get("selectionPointPx"),
             "videoConfig": raw_asset.get("videoConfig"),
             "sourceFps": raw_asset.get("sourceFps"),
