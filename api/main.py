@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import hmac
 from pathlib import Path
 import shutil
 from threading import Lock
@@ -17,7 +18,7 @@ from uuid import uuid4
 import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from sam_3d_body import __version__
 from sam_3d_body.reference_assets import (
@@ -37,6 +38,7 @@ from poc.alignment_3d_viewer.export_assets import export_assets as export_viewer
 from sam_3d_body.utils.logging import configure_logging, get_pylogger, log_event
 
 from .config import ApiSettings, load_api_settings
+from .account_erasure import AccountErasure
 from .models import (
     GeneratedAssetFileModel,
     GeneratedAssetFilesModel,
@@ -72,6 +74,10 @@ class ServiceState:
     estimator_load_error: str | None = None
     estimator_lock: Lock = field(default_factory=Lock)
     job_manager: "AsyncInferenceJobManager | None" = None
+    account_erasure: AccountErasure = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.account_erasure = AccountErasure(self.settings.artifact_root)
 
 
 @dataclass(frozen=True)
@@ -560,6 +566,15 @@ def _emit_inference_failure_event(
 
 
 def _run_video_inference_sync(
+    state: ServiceState,
+    payload: VideoInferenceRequest,
+    trace_context: TechniqueTraceContext,
+) -> dict[str, Any]:
+    with state.account_erasure.processing(trace_context.user_id):
+        return _run_video_inference_sync_impl(state, payload, trace_context)
+
+
+def _run_video_inference_sync_impl(
     state: ServiceState,
     payload: VideoInferenceRequest,
     trace_context: TechniqueTraceContext,
@@ -1167,6 +1182,12 @@ class AsyncInferenceJobManager:
             "startedAt": None,
             "completedAt": None,
             "request": payload.model_dump(by_alias=True),
+            # Terminal jobs discard their original request URLs. Keep only the
+            # owned output namespace so deletion can still locate local files.
+            "erasureStorage": {
+                "prefix": payload.storage.prefix,
+                "managed": payload.storage.output_dir is None,
+            },
             "traceContext": {
                 "traceId": trace_context.trace_id,
                 "taskId": trace_context.task_id,
@@ -1187,7 +1208,8 @@ class AsyncInferenceJobManager:
             "result": None,
             "error": None,
         }
-        await self._write_job_record(job_id, record)
+        if not await self._write_job_record(job_id, record):
+            raise HTTPException(status_code=410, detail="Account deleted.")
         _emit_trace_event(
             self._state.settings,
             trace_context,
@@ -1208,6 +1230,8 @@ class AsyncInferenceJobManager:
         )
         if not isinstance(record, dict):
             return None
+        if self._state.account_erasure.is_deleted(_extract_trace_context_from_job_record(record).user_id):
+            return None
         record["callbackDelivery"] = _normalize_job_callback_delivery(
             record,
             now_ms=int(time.time() * 1000),
@@ -1221,14 +1245,20 @@ class AsyncInferenceJobManager:
             self._queued_job_ids.add(job_id)
         await self._queue.put(job_id)
 
-    async def _write_job_record(self, job_id: str, record: dict[str, Any]) -> None:
+    async def _write_job_record(self, job_id: str, record: dict[str, Any]) -> bool:
         record_to_store = deepcopy(record)
         record_to_store["request"] = _build_persisted_job_request(record_to_store)
-        await asyncio.to_thread(
-            _write_json_atomic,
-            _job_record_path(self._state.settings, job_id),
-            record_to_store,
-        )
+        def persist() -> bool:
+            user_id = _extract_trace_context_from_job_record(record).user_id
+            try:
+                with self._state.account_erasure.processing(user_id):
+                    _write_json_atomic(_job_record_path(self._state.settings, job_id), record_to_store)
+                    return True
+            except ValueError as exc:
+                if str(exc) == "account_deleted":
+                    return False
+                raise
+        return await asyncio.to_thread(persist)
 
     async def _recover_jobs(self) -> None:
         for job_path in await asyncio.to_thread(
@@ -1418,6 +1448,8 @@ class AsyncInferenceJobManager:
 
     async def _deliver_callback(self, record: dict[str, Any]) -> None:
         trace_context = _extract_trace_context_from_job_record(record)
+        if self._state.account_erasure.is_deleted(trace_context.user_id):
+            return
         request_payload = (
             record.get("request") if isinstance(record.get("request"), dict) else {}
         )
@@ -1565,6 +1597,26 @@ def create_app(
     )
     app.state.service_state = service_state
 
+    @app.post("/internal/account-erasure")
+    async def erase_account(request: Request):
+        token = resolved_settings.account_deletion_token
+        supplied = request.headers.get("authorization", "")
+        if not token or not hmac.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
+            raise HTTPException(status_code=401, detail="Unauthorized.")
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid request.")
+        user_id = body.get("userId") if isinstance(body, dict) else None
+        if not isinstance(user_id, str) or not user_id or len(user_id) > 256:
+            raise HTTPException(status_code=400, detail="Invalid userId.")
+        try:
+            complete = await asyncio.to_thread(service_state.account_erasure.erase, user_id)
+        except (OSError, ValueError, TypeError, AttributeError):
+            complete = False
+        return JSONResponse({"userId": user_id, "status": "complete" if complete else "pending"},
+                            status_code=200 if complete else 202)
+
     @app.get("/health", response_model=HealthResponse)
     def health() -> dict[str, Any]:
         state: ServiceState = app.state.service_state
@@ -1627,9 +1679,13 @@ def create_app(
         root = (
             Path(app.state.service_state.settings.artifact_root).expanduser().resolve()
         )
+        if artifact_path.split("/", 1)[0] in {"jobs", "account-erasure"}:
+            raise HTTPException(status_code=404, detail="Artifact not found.")
         resolved_path = (root / artifact_path).resolve()
         try:
-            resolved_path.relative_to(root)
+            relative = resolved_path.relative_to(root)
+            if relative.parts and relative.parts[0] in {"jobs", "account-erasure"}:
+                raise HTTPException(status_code=404, detail="Artifact not found.")
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="Artifact not found.") from exc
         if not resolved_path.exists() or not resolved_path.is_file():

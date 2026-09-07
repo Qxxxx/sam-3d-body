@@ -28,6 +28,7 @@ class ApiSettings:
     technique_trace_ingest_token: str | None = None
     runtime_env: str = "gpu-server"
     job_concurrency: int = 1
+    account_deletion_token: str | None = None
 
 
 def _read_bool_env(name: str, default: bool) -> bool:
@@ -75,5 +76,6 @@ def load_api_settings() -> ApiSettings:
         ),
         runtime_env=os.getenv("SAM3DBODY_RUNTIME_ENV", "gpu-server").strip()
         or "gpu-server",
+        account_deletion_token=os.getenv("SAM3DBODY_ACCOUNT_DELETION_TOKEN", "").strip() or None,
         job_concurrency=_read_positive_int_env("SAM3DBODY_JOB_CONCURRENCY", 1),
     )
