@@ -17,7 +17,8 @@ LEFT_HIP_INDEX = 9
 RIGHT_HIP_INDEX = 10
 UP_JOINT_INDEX = 69  # neck
 EPSILON = 1e-6
-TARGET_VISUAL_HEIGHT = 2.4
+# Shared scene size for the skeletal chain, not the posed mesh's Y extent.
+TARGET_BODY_SCALE = 2.4
 TEMPORAL_FILTER_COEFFICIENTS = (0.2, 0.6, 0.2)
 TEMPORAL_FILTER_PASSES = 1
 
@@ -154,7 +155,7 @@ def root_center_mesh_frames(
     source_frame_indices: list[int],
     *,
     body_scale: float,
-    visual_scale: float,
+    target_body_scale: float,
 ) -> np.ndarray:
     """Keep the capture orientation while removing translation and body size."""
     vertices = np.asarray(vertices, dtype=np.float32)
@@ -165,8 +166,8 @@ def root_center_mesh_frames(
         raise ValueError("keypoints_3d must have shape [frames, joints, 3]")
     if not np.isfinite(body_scale) or body_scale <= EPSILON:
         raise ValueError("body_scale must be finite and positive")
-    if not np.isfinite(visual_scale) or visual_scale <= EPSILON:
-        raise ValueError("visual_scale must be finite and positive")
+    if not np.isfinite(target_body_scale) or target_body_scale <= EPSILON:
+        raise ValueError("target_body_scale must be finite and positive")
 
     output = np.empty(
         (len(source_frame_indices), vertices.shape[1], 3), dtype=np.float32
@@ -179,7 +180,7 @@ def root_center_mesh_frames(
             + keypoints[source_index, RIGHT_HIP_INDEX]
         ) * 0.5
         output[output_index] = (
-            (vertices[source_index] - root) / body_scale * visual_scale
+            (vertices[source_index] - root) / body_scale * target_body_scale
         )
     return output
 
@@ -237,17 +238,6 @@ def _write_float_buffer(path: Path, values: np.ndarray) -> None:
 
 def _write_index_buffer(path: Path, values: np.ndarray) -> None:
     np.asarray(values, dtype="<u4").tofile(path)
-
-
-def normalize_visual_height(positions: np.ndarray) -> tuple[np.ndarray, float, float]:
-    """Apply one uniform scale so the sequence has a stable target mesh height."""
-    heights = np.ptp(np.asarray(positions, dtype=np.float32)[:, :, 1], axis=1)
-    valid = heights[np.isfinite(heights) & (heights > EPSILON)]
-    if valid.size == 0:
-        raise ValueError("Unable to derive a valid visual mesh height")
-    median_height = float(np.median(valid))
-    visual_scale = TARGET_VISUAL_HEIGHT / median_height
-    return positions * visual_scale, median_height, visual_scale
 
 
 def _bounds(*position_sets: np.ndarray) -> dict[str, list[float]]:
@@ -309,27 +299,23 @@ def export_assets(
         reference_indices,
         body_scale=reference_body_scale,
     )
-    user_positions, user_median_height, user_visual_scale = normalize_visual_height(
-        user_positions
-    )
-    (
-        reference_positions,
-        reference_median_height,
-        reference_visual_scale,
-    ) = normalize_visual_height(reference_positions)
+    # Never fit each person's posed height: crouching or raising a hand must
+    # not change their overall size. Both use the same scene-space chain size.
+    user_positions *= TARGET_BODY_SCALE
+    reference_positions *= TARGET_BODY_SCALE
     user_raw_positions = root_center_mesh_frames(
         user_vertices,
         user_keypoints,
         user_indices,
         body_scale=user_body_scale,
-        visual_scale=user_visual_scale,
+        target_body_scale=TARGET_BODY_SCALE,
     )
     reference_raw_positions = root_center_mesh_frames(
         reference_vertices,
         reference_keypoints,
         reference_indices,
         body_scale=reference_body_scale,
-        visual_scale=reference_visual_scale,
+        target_body_scale=TARGET_BODY_SCALE,
     )
     user_bases = body_basis_frames(user_keypoints, user_indices)
     reference_bases = body_basis_frames(
@@ -414,6 +400,7 @@ def export_assets(
             "steps": compact_steps,
         },
         "normalization": {
+            "method": "skeletal-chain-v1",
             "root": "midpoint(leftHip, rightHip)",
             "leftHipIndex": LEFT_HIP_INDEX,
             "rightHipIndex": RIGHT_HIP_INDEX,
@@ -421,12 +408,10 @@ def export_assets(
             "scale": "median(neck-to-pelvis + neck-to-nose + average leg-chain length)",
             "userBodyScale": user_body_scale,
             "referenceBodyScale": reference_body_scale,
-            "targetVisualHeight": TARGET_VISUAL_HEIGHT,
-            "userMedianHeightBeforeVisualScale": user_median_height,
-            "referenceMedianHeightBeforeVisualScale": reference_median_height,
-            "userVisualScale": user_visual_scale,
-            "referenceVisualScale": reference_visual_scale,
-            "description": "Per-frame root translation and body-basis rotation with one stable skeletal scale and one stable visual-height scale per person.",
+            "targetBodyScale": TARGET_BODY_SCALE,
+            "userScaleFactor": TARGET_BODY_SCALE / user_body_scale,
+            "referenceScaleFactor": TARGET_BODY_SCALE / reference_body_scale,
+            "description": "Per-frame root translation and body-basis rotation with one uniform scale per person derived from the sequence median skeletal chain. Both share the same target chain size; posed mesh height and body proportions are preserved.",
         },
         "temporalFilter": {
             "type": "symmetric-three-tap-low-pass",

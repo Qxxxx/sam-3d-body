@@ -74,9 +74,22 @@ so it reduces prediction jitter without adding playback latency. The window is
 intentionally short to preserve fast racket-sport motion.
 
 Unified-view buffers use the MHR70 hip midpoint as the root, the hip axis and
-neck as the body basis, and one stable bone-chain scale per person. The exporter
-then applies one uniform per-person visual-height calibration across the whole
-sequence. Per-frame basis matrices provide the relative rotation from the user
+neck as the body basis, and one stable bone-chain scale per person. The scale is
+the sequence median of neck-to-pelvis + neck-to-nose + average left/right
+leg-chain length (hip-to-knee + knee-to-ankle). Every vertex is scaled uniformly
+by `2.4 / bodyScale`, giving both people the same target skeletal-chain size
+while preserving their body proportions. There is no subsequent mesh-height
+fitting: crouching stays lower and raising a hand does not shrink the body.
+The chain is estimated from source keypoints before temporal smoothing, so
+blending bent joints cannot shorten the normalization length.
+
+The manifest's `normalization.method` is `skeletal-chain-v1`;
+`targetBodyScale`, `userScaleFactor`, and `referenceScaleFactor` describe the
+new scaling. These replace the old visual-height diagnostics; the v1 buffer
+layout and viewer loading contract remain compatible. Previously generated
+assets retain their old scale and must be re-exported to use this method.
+
+Per-frame basis matrices provide the relative rotation from the user
 capture into the reference capture orientation; the reference itself is never
 rotated to a third canonical camera. The stable scale prevents model size from
 pulsing frame by frame.

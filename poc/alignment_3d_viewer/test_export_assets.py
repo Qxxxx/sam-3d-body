@@ -4,16 +4,16 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 
 from export_assets import (
-    TARGET_VISUAL_HEIGHT,
+    TARGET_BODY_SCALE,
     _load_render_asset,
     body_basis_frames,
     canonicalize_mesh_frames,
     export_assets,
-    normalize_visual_height,
     root_center_mesh_frames,
     sequence_body_scale,
     temporal_smooth_frames,
@@ -191,26 +191,6 @@ class CanonicalMeshExportTests(unittest.TestCase):
 
         self.assertAlmostEqual(sequence_body_scale(keypoints), 2.5)
 
-    def test_visual_height_normalization_uses_one_sequence_scale(self) -> None:
-        positions = np.asarray(
-            [
-                [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
-                [[0.0, -2.0, 0.0], [0.0, 2.0, 0.0]],
-                [[0.0, -1.5, 0.0], [0.0, 1.5, 0.0]],
-            ],
-            dtype=np.float32,
-        )
-
-        normalized, median_height, visual_scale = normalize_visual_height(positions)
-
-        self.assertAlmostEqual(median_height, 3.0)
-        self.assertAlmostEqual(visual_scale, TARGET_VISUAL_HEIGHT / 3.0)
-        self.assertAlmostEqual(
-            float(np.median(np.ptp(normalized[:, :, 1], axis=1))),
-            TARGET_VISUAL_HEIGHT,
-            places=6,
-        )
-
     def test_raw_frames_and_basis_reproduce_canonical_view(self) -> None:
         keypoints = np.zeros((1, 70, 3), dtype=np.float32)
         keypoints[:, 0] = [0.0, 1.5, 0.0]
@@ -234,7 +214,7 @@ class CanonicalMeshExportTests(unittest.TestCase):
             keypoints,
             [0],
             body_scale=body_scale,
-            visual_scale=1.0,
+            target_body_scale=1.0,
         )
         basis = body_basis_frames(keypoints, [0])
 
@@ -264,6 +244,169 @@ class CanonicalMeshExportTests(unittest.TestCase):
             reference_raw,
             atol=1e-6,
         )
+
+
+class SkeletalScaleExportTests(unittest.TestCase):
+    @staticmethod
+    def standing_pose() -> np.ndarray:
+        points = np.zeros((3, 70, 3), dtype=np.float32)
+        points[:, 0] = [0.0, 1.5, 0.0]
+        points[:, 69] = [0.0, 1.0, 0.0]
+        points[:, 5] = [-0.6, 0.9, 0.0]
+        points[:, 6] = [0.6, 0.9, 0.0]
+        for hip, knee, ankle, x in ((9, 11, 13, -0.3), (10, 12, 14, 0.3)):
+            points[:, hip] = [x, 0.0, 0.0]
+            points[:, knee] = [x, -0.5, 0.0]
+            points[:, ankle] = [x, -1.0, 0.0]
+        return points
+
+    def export_pair(self, user: np.ndarray, reference: np.ndarray) -> tuple:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, points in (("user", user), ("reference", reference)):
+                # Use joint positions as synthetic mesh probes so a hand or
+                # ankle can alter mesh bounds without changing body length.
+                np.savez(
+                    root / f"{name}.npz",
+                    vertices_3d=points,
+                    keypoints_3d=points,
+                    faces=np.asarray([[0, 5, 6]], dtype=np.int32),
+                    timestamps=np.arange(3, dtype=np.float32),
+                    cam_t=np.tile([0.0, 0.0, 3.0], (3, 1)),
+                    cam_intrinsics=np.tile(np.eye(3), (3, 1, 1)),
+                    image_size_hw=np.asarray([720, 1280]),
+                )
+            alignment = root / "alignment.json"
+            alignment.write_text(
+                json.dumps({"alignmentPath": [
+                    {
+                        "userFrameIndex": i,
+                        "referenceFrameIndex": i,
+                        "userTimestamp": float(i),
+                        "referenceTimestamp": float(i),
+                        "distance": 0.0,
+                    }
+                    for i in range(3)
+                ]}),
+                encoding="utf-8",
+            )
+            metadata = export_assets(
+                user_render_path=root / "user.npz",
+                reference_render_path=root / "reference.npz",
+                alignment_path=alignment,
+                output_dir=root / "output",
+                user_label="User",
+                reference_label="Reference",
+                fps=1.0,
+            )
+            buffers = {
+                key: np.fromfile(
+                    root / "output" / metadata["files"][key], dtype="<f4"
+                ).reshape(3, 70, 3)
+                for key in (
+                    "userPositions", "referencePositions", "userRawPositions",
+                    "referenceRawPositions", "userCameraPositions",
+                    "referenceCameraPositions",
+                )
+            }
+            for subject in ("user", "reference"):
+                for suffix in ("CameraTranslation", "CameraIntrinsics"):
+                    key = subject + suffix
+                    buffers[key] = np.fromfile(
+                        root / "output" / metadata["files"][key], dtype="<f4"
+                    )
+            return metadata, buffers
+
+    def test_unified_scale_cannot_change_video_overlay_buffers(self) -> None:
+        reference = self.standing_pose()
+        user = reference * 1.5
+        user[:, 7, 1] = [1.0, 3.0, 4.0]
+        user += np.asarray([1.0, 2.0, 0.5], dtype=np.float32)
+        original_metadata, original = self.export_pair(user, reference)
+
+        with patch("export_assets.TARGET_BODY_SCALE", TARGET_BODY_SCALE * 2):
+            enlarged_metadata, enlarged = self.export_pair(user, reference)
+
+        for subject in ("user", "reference"):
+            for suffix in ("CameraPositions", "CameraTranslation", "CameraIntrinsics"):
+                key = subject + suffix
+                self.assertEqual(original[key].tobytes(), enlarged[key].tobytes())
+            for suffix in ("Positions", "RawPositions"):
+                key = subject + suffix
+                np.testing.assert_allclose(enlarged[key], original[key] * 2)
+        self.assertEqual(
+            original_metadata["cameraOverlay"], enlarged_metadata["cameraOverlay"]
+        )
+        np.testing.assert_array_equal(
+            original["userCameraPositions"], temporal_smooth_frames(user)
+        )
+        np.testing.assert_array_equal(
+            original["referenceCameraPositions"], temporal_smooth_frames(reference)
+        )
+
+    def test_crouching_does_not_enlarge_body(self) -> None:
+        standing = self.standing_pose()
+        crouching = standing.copy()
+        for knee, ankle, x in ((11, 13, -0.3), (12, 14, 0.3)):
+            crouching[:, knee] = [x, -0.3, 0.4]
+            crouching[:, ankle] = [x, -0.6, 0.0]
+
+        metadata, buffers = self.export_pair(crouching, standing)
+
+        normalization = metadata["normalization"]
+        self.assertEqual(normalization["method"], "skeletal-chain-v1")
+        self.assertAlmostEqual(normalization["userBodyScale"], 2.5)
+        self.assertAlmostEqual(normalization["referenceBodyScale"], 2.5)
+        self.assertAlmostEqual(
+            normalization["userScaleFactor"], TARGET_BODY_SCALE / 2.5
+        )
+        self.assertNotIn("targetVisualHeight", normalization)
+        for suffix in ("Positions", "RawPositions"):
+            user, reference = buffers["user" + suffix], buffers["reference" + suffix]
+            np.testing.assert_allclose(
+                user[:, [0, 5, 6, 69]], reference[:, [0, 5, 6, 69]]
+            )
+            self.assertTrue(np.all(
+                np.ptp(user[:, :, 1], axis=1) < np.ptp(reference[:, :, 1], axis=1)
+            ))
+        np.testing.assert_allclose(buffers["userCameraPositions"], crouching)
+
+    def test_raised_hand_does_not_shrink_body_or_pulse_between_frames(self) -> None:
+        standing = self.standing_pose()
+        raised = standing.copy()
+        raised[:, 7] = [[0.7, 1.0, 0.0], [0.7, 3.0, 0.0], [0.7, 4.0, 0.0]]
+
+        _, buffers = self.export_pair(raised, standing)
+
+        for suffix in ("Positions", "RawPositions"):
+            user, reference = buffers["user" + suffix], buffers["reference" + suffix]
+            np.testing.assert_allclose(
+                user[:, [0, 5, 6, 69]], reference[:, [0, 5, 6, 69]]
+            )
+            np.testing.assert_allclose(user[0, [5, 6]], user[2, [5, 6]])
+            self.assertGreater(float(user[2, 7, 1]), float(reference[2, 0, 1]))
+
+    def test_different_sizes_match_but_body_proportions_are_preserved(self) -> None:
+        reference = self.standing_pose()
+        user = reference * 1.5
+        user[:, [5, 6], 0] *= 1.2  # A larger person with proportionally wider shoulders.
+        user += np.asarray([10.0, 4.0, -2.0], dtype=np.float32)
+
+        metadata, buffers = self.export_pair(user, reference)
+
+        self.assertAlmostEqual(metadata["normalization"]["userBodyScale"], 3.75)
+        for suffix in ("Positions", "RawPositions"):
+            u, r = buffers["user" + suffix], buffers["reference" + suffix]
+            np.testing.assert_allclose(
+                u[:, [0, 9, 10, 11, 12, 13, 14, 69]],
+                r[:, [0, 9, 10, 11, 12, 13, 14, 69]],
+                atol=1e-6,
+            )
+            np.testing.assert_allclose(
+                u[:, 6, 0] - u[:, 5, 0],
+                1.2 * (r[:, 6, 0] - r[:, 5, 0]),
+                atol=1e-6,
+            )
 
 
 if __name__ == "__main__":
