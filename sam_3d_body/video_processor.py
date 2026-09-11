@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
+from http.client import IncompleteRead
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,6 +173,8 @@ def _is_remote_video_path(video_path: str) -> bool:
 
 
 def _classify_remote_video_fetch_error(raw_path: str, exc: Exception) -> Exception:
+    # Signed source URLs must not be returned in public job errors.
+    raw_path = "remote video"
     if isinstance(exc, HTTPError):
         if exc.code == 404:
             return FileNotFoundError(f"Video not found: {raw_path}")
@@ -184,12 +188,12 @@ def _classify_remote_video_fetch_error(raw_path: str, exc: Exception) -> Excepti
         reason = exc.reason
         if isinstance(reason, (TimeoutError, SocketTimeout)):
             return TimeoutError(f"Timed out fetching video: {raw_path}")
-        return ConnectionError(f"Failed to fetch video: {raw_path} ({reason})")
+        return ConnectionError(f"Failed to fetch video: {raw_path} ({type(reason).__name__})")
 
     if isinstance(exc, (TimeoutError, SocketTimeout)):
         return TimeoutError(f"Timed out fetching video: {raw_path}")
 
-    return ConnectionError(f"Failed to fetch video: {raw_path} ({exc})")
+    return ConnectionError(f"Failed to fetch video: {raw_path} ({type(exc).__name__})")
 
 
 @contextmanager
@@ -207,12 +211,25 @@ def _resolve_video_file(video_path: str | Path):
         temp_file.close()
 
         try:
-            with urlopen(raw_path, timeout=30) as response, temp_path.open("wb") as output:
-                shutil.copyfileobj(response, output)
+            for attempt in range(3):
+                try:
+                    # Reopen with wb on each attempt so a partial download is
+                    # discarded rather than prepended to the successful file.
+                    with urlopen(raw_path, timeout=30) as response, temp_path.open("wb") as output:
+                        shutil.copyfileobj(response, output)
+                    break
+                except Exception as exc:
+                    retryable = (
+                        exc.code in {408, 429, 500, 502, 503, 504}
+                        if isinstance(exc, HTTPError)
+                        else isinstance(exc, (URLError, TimeoutError, ConnectionError, IncompleteRead))
+                    )
+                    if retryable and attempt < 2:
+                        time.sleep(2**attempt)
+                        continue
+                    raise _classify_remote_video_fetch_error(raw_path, exc) from exc
             yield temp_path
             return
-        except Exception as exc:
-            raise _classify_remote_video_fetch_error(raw_path, exc) from exc
         finally:
             temp_path.unlink(missing_ok=True)
 

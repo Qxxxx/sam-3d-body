@@ -86,6 +86,7 @@ Linux-only runtime:
 - the expected developer environment is `conda activate sam_3d_body`
 - API artifacts default to `${TMPDIR:-/tmp}/sam3d-body-api`; override with `SAM3DBODY_ARTIFACT_ROOT` if you need a persistent or larger volume
 - `storage.mode=direct_upload` still stages files locally first, then removes service-managed scratch output after a successful upload
+- Remote input video downloads retry transient transport/HTTP errors up to three attempts with 1s/2s backoff, truncating partial downloads on retry and omitting signed URLs from public errors.
 - Direct artifact PUTs retry transport interruptions and HTTP 429/500/502/503/504 up to three attempts with 1s/2s backoff, reusing the same target and bytes. Permanent errors such as expired signatures are not retried; public upload errors omit signed URLs.
 
 Deterministic local setup on Linux:

@@ -199,3 +199,49 @@ def test_extract_skeleton_sequence_returns_camera_metadata(tmp_path: Path) -> No
     assert camera["source"] == "moge2"
     assert len(camera["horizontalFovDeg"]) == 3
     assert len(camera["timestamps"]) == 3
+
+
+@pytest.mark.parametrize("failure", ["timeout", "partial", "503"])
+def test_remote_video_retries_and_discards_partial_download(monkeypatch: Any, failure: str) -> None:
+    from sam_3d_body.video_processor import _resolve_video_file
+    calls = []
+    class PartialResponse(io.BytesIO):
+        def read(self, size=-1):
+            if self.tell() > 0:
+                raise ConnectionResetError("disconnected")
+            return super().read(3)
+    def open_url(url, timeout):
+        calls.append(url)
+        if len(calls) == 1:
+            if failure == "timeout":
+                raise TimeoutError("network timeout")
+            if failure == "503":
+                raise HTTPError(url, 503, "Unavailable", None, None)
+            return PartialResponse(b"partial")
+        return io.BytesIO(b"complete-video")
+    monkeypatch.setattr("sam_3d_body.video_processor.urlopen", open_url)
+    monkeypatch.setattr("sam_3d_body.video_processor.time.sleep", lambda _: None)
+    with _resolve_video_file("https://example.com/video.mp4?signature=secret") as resolved:
+        assert resolved.read_bytes() == b"complete-video"
+    assert not resolved.exists()
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+
+
+@pytest.mark.parametrize("failure,attempts", [(403, 1), (404, 1), (503, 3), ("timeout", 3)])
+def test_remote_video_bounds_retries_and_redacts_errors(monkeypatch: Any, failure: Any, attempts: int) -> None:
+    from sam_3d_body.video_processor import _resolve_video_file
+    calls = []
+    def open_url(url, timeout):
+        calls.append(url)
+        if failure == "timeout":
+            raise TimeoutError(f"Timed out: {url}")
+        raise HTTPError(url, failure, "Failure", None, None)
+    monkeypatch.setattr("sam_3d_body.video_processor.urlopen", open_url)
+    monkeypatch.setattr("sam_3d_body.video_processor.time.sleep", lambda _: None)
+    with pytest.raises((ConnectionError, FileNotFoundError, TimeoutError)) as error:
+        with _resolve_video_file("https://example.com/video.mp4?signature=secret"):
+            pass
+    assert len(calls) == attempts
+    assert "secret" not in str(error.value)
+    assert "https://" not in str(error.value)
