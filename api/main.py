@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
@@ -43,6 +44,7 @@ from .models import (
     GeneratedAssetFileModel,
     GeneratedAssetFilesModel,
     HealthResponse,
+    VideoAssetUploadTargetModel,
     VideoInferenceCallbackConfigModel,
     VideoInferenceCameraModel,
     VideoInferenceJobAcceptedResponse,
@@ -501,6 +503,39 @@ def _build_uploaded_file_descriptor(
     )
 
 
+def _upload_viewer_artifacts(
+    *,
+    settings: ApiSettings,
+    trace_context: TechniqueTraceContext,
+    asset_id: str,
+    output_dir: Path,
+    uploads: dict[str, VideoAssetUploadTargetModel],
+) -> dict[str, GeneratedAssetFileModel]:
+    def upload(item: tuple[str, VideoAssetUploadTargetModel]):
+        file_name, target = item
+        path = output_dir / file_name
+        started = time.monotonic()
+        _upload_generated_artifact(
+            settings=settings, trace_context=trace_context,
+            asset_id=asset_id, artifact_type=f"viewer:{file_name}",
+            path=path, put_url=target.put_url, fetch_url=target.fetch_url,
+            content_type=target.content_type,
+        )
+        # Local structured progress only: no signed URLs or extra network calls.
+        log_event(LOGGER, "info", {
+            "message": "Viewer artifact uploaded", "component": "artifact_upload",
+            "artifactType": file_name, "sizeBytes": path.stat().st_size,
+            "durationMs": round((time.monotonic() - started) * 1000),
+        })
+        return file_name, _build_uploaded_file_descriptor(path=path, fetch_url=target.fetch_url)
+
+    # These immutable files are independent. Bound bandwidth/memory to three
+    # in-flight files and wait for all workers even if one upload fails. The
+    # caller can only publish completion or remove scratch files after this exits.
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="viewer-upload") as pool:
+        return dict(pool.map(upload, uploads.items()))
+
+
 def _cleanup_managed_artifact_output_dir(
     *,
     settings: ApiSettings,
@@ -799,23 +834,13 @@ def _run_video_inference_sync_impl(
 
         viewer_generated_files: dict[str, GeneratedAssetFileModel] | None = None
         if payload.viewer_comparison is not None and viewer_output_dir is not None:
-            viewer_generated_files = {}
-            for file_name, upload_target in payload.viewer_comparison.uploads.items():
-                viewer_path = viewer_output_dir / file_name
-                _upload_generated_artifact(
-                    settings=state.settings,
-                    trace_context=trace_context,
-                    asset_id=entry.reference_id or "asset",
-                    artifact_type=f"viewer:{file_name}",
-                    path=viewer_path,
-                    put_url=upload_target.put_url,
-                    fetch_url=upload_target.fetch_url,
-                    content_type=upload_target.content_type,
-                )
-                viewer_generated_files[file_name] = _build_uploaded_file_descriptor(
-                    path=viewer_path,
-                    fetch_url=upload_target.fetch_url,
-                )
+            viewer_generated_files = _upload_viewer_artifacts(
+                settings=state.settings,
+                trace_context=trace_context,
+                asset_id=entry.reference_id or "asset",
+                output_dir=viewer_output_dir,
+                uploads=payload.viewer_comparison.uploads,
+            )
         _emit_trace_event(
             state.settings,
             trace_context,

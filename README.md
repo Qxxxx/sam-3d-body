@@ -87,6 +87,7 @@ Linux-only runtime:
 - API artifacts default to `${TMPDIR:-/tmp}/sam3d-body-api`; override with `SAM3DBODY_ARTIFACT_ROOT` if you need a persistent or larger volume
 - `storage.mode=direct_upload` still stages files locally first, then removes service-managed scratch output after a successful upload
 - Remote input video downloads retry transient transport/HTTP errors up to three attempts with 1s/2s backoff, truncating partial downloads on retry and omitting signed URLs from public errors.
+- Viewer files upload with at most three concurrent transfers. Completion and scratch cleanup wait for every transfer; per-file logs include size and duration without signed URLs.
 - Direct artifact PUTs retry transport interruptions and HTTP 429/500/502/503/504 up to three attempts with 1s/2s backoff, reusing the same target and bytes. Permanent errors such as expired signatures are not retried; public upload errors omit signed URLs.
 
 Deterministic local setup on Linux:

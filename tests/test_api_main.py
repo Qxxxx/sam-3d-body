@@ -1375,3 +1375,58 @@ def test_artifact_upload_bounds_transport_retries_and_redacts_errors(tmp_path: P
     assert len(calls) == 3
     assert "secret" not in str(error.value)
     assert "https://" not in str(error.value)
+
+
+def test_viewer_uploads_are_bounded_and_all_complete_before_publication(tmp_path: Path, monkeypatch: Any) -> None:
+    from threading import Barrier, Lock
+    from api.main import _upload_viewer_artifacts
+    from api.models import VideoAssetUploadTargetModel
+    barrier = Barrier(3)
+    lock = Lock()
+    active = 0
+    peak = 0
+    completed = []
+    targets = {}
+    for index in range(7):
+        name = f"file-{index}.bin"
+        (tmp_path / name).write_bytes(b"mesh")
+        targets[name] = VideoAssetUploadTargetModel(putUrl=f"https://uploads.example/{name}", fetchUrl=f"r2://bucket/{name}")
+    def upload(**kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        if kwargs["path"].name in {"file-0.bin", "file-1.bin", "file-2.bin"}:
+            barrier.wait(timeout=5)
+        assert kwargs["path"].exists()
+        with lock:
+            completed.append(kwargs["path"].name)
+            active -= 1
+    monkeypatch.setattr("api.main._upload_generated_artifact", upload)
+    result = _upload_viewer_artifacts(settings=None, trace_context=None, asset_id="test", output_dir=tmp_path, uploads=targets)
+    assert peak == 3
+    assert active == 0
+    assert set(completed) == set(targets)
+    assert set(result) == set(targets)
+    assert all(descriptor.size_bytes == 4 for descriptor in result.values())
+
+
+def test_viewer_upload_failure_waits_for_running_uploads(tmp_path: Path, monkeypatch: Any) -> None:
+    from threading import Barrier, Event
+    from api.main import _upload_viewer_artifacts
+    from api.models import VideoAssetUploadTargetModel
+    barrier = Barrier(2)
+    completed = Event()
+    targets = {name: VideoAssetUploadTargetModel(putUrl=f"https://uploads.example/{name}", fetchUrl=f"r2://bucket/{name}") for name in ("bad.bin", "good.bin")}
+    for name in targets:
+        (tmp_path / name).write_bytes(b"mesh")
+    def upload(**kwargs):
+        barrier.wait(timeout=5)
+        if kwargs["path"].name == "bad.bin":
+            raise ConnectionError("upload failed")
+        completed.set()
+    monkeypatch.setattr("api.main._upload_generated_artifact", upload)
+    with pytest.raises(ConnectionError):
+        _upload_viewer_artifacts(settings=None, trace_context=None, asset_id="test", output_dir=tmp_path, uploads=targets)
+    assert completed.is_set()
+    assert (tmp_path / "good.bin").exists()
