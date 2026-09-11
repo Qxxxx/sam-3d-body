@@ -1043,3 +1043,25 @@ def test_build_reference_asset_bundle_uses_full_frame_when_padded_crop_exceeds_s
         assert int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 80
     finally:
         capture.release()
+
+
+def test_sdr_cropped_output_prefers_browser_h264_and_keeps_hdr_hevc() -> None:
+    from sam_3d_body.reference_assets import _build_ffmpeg_video_encode_candidates
+    sdr = _build_ffmpeg_video_encode_candidates({"pix_fmt": "yuv420p"})
+    hdr = _build_ffmpeg_video_encode_candidates({"pix_fmt": "yuv420p10le"})
+    assert sdr[0][sdr[0].index("-c:v") + 1] == "h264_nvenc"
+    assert sdr[1][sdr[1].index("-c:v") + 1] == "libx264"
+    assert not any("hevc_nvenc" in candidate for candidate in sdr)
+    assert "hevc_nvenc" in hdr[0]
+    assert "p010le" in hdr[0]
+
+
+@pytest.mark.skipif(not (HAS_FFMPEG and HAS_FFPROBE), reason="Requires ffmpeg/ffprobe")
+def test_cropped_sdr_video_is_actually_h264(tmp_path: Path) -> None:
+    from sam_3d_body.reference_assets import _render_cropped_follow_video_with_ffmpeg
+    source = tmp_path / "input.mp4"
+    result = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=640x480:d=0.3:r=10", "-c:v", "mpeg4", str(source)], capture_output=True)
+    assert result.returncode == 0
+    output = tmp_path / "output.mp4"
+    assert _render_cropped_follow_video_with_ffmpeg(video_path=source, output_path=output, filter_expression="crop=320:240", source_stream={"pix_fmt": "yuv420p"})
+    assert _probe_video_stream(output)["codec_name"] == "h264"

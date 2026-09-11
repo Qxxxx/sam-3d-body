@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -806,7 +807,7 @@ def _copy_video_stream_without_reencode(
     video_path: str | Path,
     output_path: str | Path,
 ) -> bool:
-    ffmpeg_command = shutil.which("ffmpeg")
+    ffmpeg_command = shutil.which(os.environ.get("SAM3DBODY_FFMPEG_PATH", "ffmpeg"))
     if ffmpeg_command is None:
         return False
 
@@ -1049,46 +1050,18 @@ def _build_ffmpeg_video_encode_candidates(
             ]
         )
     else:
-        candidates.append(
-            [
-                "-c:v",
-                "hevc_nvenc",
-                "-preset",
-                "p6",
-                "-tune",
-                "hq",
-                "-rc",
-                "vbr",
-                "-cq",
-                "18",
-                "-b:v",
-                "0",
-                "-pix_fmt",
-                "yuv420p",
-                "-profile:v",
-                "main",
-                "-tag:v",
-                "hvc1",
-            ]
-        )
-        candidates.append(
-            [
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p6",
-                "-tune",
-                "hq",
-                "-rc",
-                "vbr",
-                "-cq",
-                "18",
-                "-b:v",
-                "0",
-                "-pix_fmt",
-                "yuv420p",
-            ]
-        )
+        # Ordinary Web video playback requires H.264. HEVC may decode on iOS
+        # while Chromium reports MEDIA_ERR_SRC_NOT_SUPPORTED for the same MP4.
+        # Avoid reorder delay/edit-list trimming so the final sampled frame stays
+        # addressable without resampling variable-frame-rate input.
+        candidates.append([
+            "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq",
+            "-rc", "vbr", "-cq", "18", "-b:v", "0", "-pix_fmt", "yuv420p", "-bf", "0", "-use_editlist", "0",
+        ])
+        candidates.append([
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-bf", "0",
+            "-pix_fmt", "yuv420p", "-use_editlist", "0",
+        ])
 
     candidates.append(
         [
@@ -1110,7 +1083,7 @@ def _render_cropped_follow_video_with_ffmpeg(
     filter_expression: str,
     source_stream: dict[str, Any] | None,
 ) -> bool:
-    ffmpeg_command = shutil.which("ffmpeg")
+    ffmpeg_command = shutil.which(os.environ.get("SAM3DBODY_FFMPEG_PATH", "ffmpeg"))
     if ffmpeg_command is None:
         return False
 
