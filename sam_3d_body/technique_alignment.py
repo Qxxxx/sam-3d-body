@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from http.client import IncompleteRead
 from pathlib import Path
 from socket import timeout as SocketTimeout
 from typing import Any
@@ -255,30 +257,31 @@ def _is_remote_npz_path(npz_path: str) -> bool:
     return parsed.scheme in _REMOTE_NPZ_SCHEMES and bool(parsed.netloc)
 
 
-def _classify_remote_npz_fetch_error(raw_path: str, exc: Exception) -> Exception:
+# Render assets can be much larger than skeleton assets. Allow slow reads and
+# retry transient failures without rerunning inference or reusing partial data.
+_REMOTE_NPZ_TIMEOUT_SECONDS = 60
+_REMOTE_NPZ_MAX_ATTEMPTS = 3
+_REMOTE_NPZ_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+
+
+def _is_retryable_npz_fetch_error(exc: Exception) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code in _REMOTE_NPZ_RETRYABLE_STATUS
+    return isinstance(exc, (URLError, TimeoutError, ConnectionError, IncompleteRead))
+
+
+def _classify_remote_npz_fetch_error(exc: Exception) -> Exception:
+    # Never send signed URLs or upstream exception text to API clients.
     if isinstance(exc, HTTPError):
         if exc.code == 404:
-            return FileNotFoundError(f"Skeleton npz not found: {raw_path}")
+            return FileNotFoundError("3D reference asset not found (HTTP 404)")
         if exc.code in {408, 504}:
-            return TimeoutError(
-                f"Timed out fetching skeleton npz: {raw_path} (HTTP {exc.code})"
-            )
-        return ConnectionError(
-            f"Failed to fetch skeleton npz: {raw_path} (HTTP {exc.code})"
-        )
-
-    if isinstance(exc, URLError):
-        reason = exc.reason
-        if isinstance(reason, (TimeoutError, SocketTimeout)):
-            return TimeoutError(f"Timed out fetching skeleton npz: {raw_path}")
-        return ConnectionError(
-            f"Failed to fetch skeleton npz: {raw_path} ({reason})"
-        )
-
-    if isinstance(exc, (TimeoutError, SocketTimeout)):
-        return TimeoutError(f"Timed out fetching skeleton npz: {raw_path}")
-
-    return ConnectionError(f"Failed to fetch skeleton npz: {raw_path} ({exc})")
+            return TimeoutError(f"Timed out fetching 3D reference asset (HTTP {exc.code})")
+        return ConnectionError(f"Failed to fetch 3D reference asset (HTTP {exc.code})")
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    if isinstance(reason, (TimeoutError, SocketTimeout)):
+        return TimeoutError("Timed out fetching 3D reference asset")
+    return ConnectionError("Failed to fetch 3D reference asset")
 
 
 @contextmanager
@@ -296,14 +299,23 @@ def _resolve_npz_file(npz_path: str | Path):
         temp_file.close()
 
         try:
-            with urlopen(raw_path, timeout=30) as response, temp_path.open("wb") as output:
-                shutil.copyfileobj(response, output)
+            for attempt in range(_REMOTE_NPZ_MAX_ATTEMPTS):
+                try:
+                    with urlopen(raw_path, timeout=_REMOTE_NPZ_TIMEOUT_SECONDS) as response:
+                        with temp_path.open("wb") as output:
+                            shutil.copyfileobj(response, output)
+                    break
+                except (URLError, TimeoutError, ConnectionError, IncompleteRead) as exc:
+                    if (attempt + 1 == _REMOTE_NPZ_MAX_ATTEMPTS
+                            or not _is_retryable_npz_fetch_error(exc)):
+                        raise _classify_remote_npz_fetch_error(exc) from None
+                    time.sleep(2 ** attempt)
+            # Consumer errors (e.g. invalid NPZ fields) are not download errors
+            # and must not trigger another transfer or lose their original type.
             yield temp_path
-            return
-        except Exception as exc:
-            raise _classify_remote_npz_fetch_error(raw_path, exc) from exc
         finally:
             temp_path.unlink(missing_ok=True)
+        return
 
     local_path = Path(raw_path)
     if not local_path.exists():

@@ -264,3 +264,12 @@ If you use SAM 3D Body or the SAM 3D Body dataset in your research, please use t
   year={2026}
 }
 ```
+
+### Remote reference asset downloads
+
+Skeleton and render NPZ downloads use a 60-second socket timeout and up to three
+attempts, with 1- and 2-second backoff for transient connection/read failures and
+HTTP 408/429/500/502/503/504. Each attempt starts a fresh temporary file download;
+partial data is never consumed. HTTP 403/404 fail immediately. Download errors
+returned to clients omit signed URLs and upstream exception text. NPZ parsing and
+consumer errors retain their original type and do not trigger download retries.

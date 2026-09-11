@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import numpy as np
 import pytest
@@ -14,6 +14,7 @@ from sam_3d_body.technique_alignment import (
     build_alignment_report,
     load_skeleton_sequence_npz,
     normalize_skeleton_sequence,
+    resolve_npz_file,
 )
 
 
@@ -147,9 +148,9 @@ def test_load_skeleton_sequence_npz_supports_remote_url(tmp_path, monkeypatch) -
             self.close()
             return False
 
-    def _fake_urlopen(url: str, timeout: int = 30):
+    def _fake_urlopen(url: str, timeout: int):
         assert url == "https://example.com/reference.npz"
-        assert timeout == 30
+        assert timeout == 60
         return _FakeResponse(payload)
 
     monkeypatch.setattr("sam_3d_body.technique_alignment.urlopen", _fake_urlopen)
@@ -162,12 +163,111 @@ def test_load_skeleton_sequence_npz_supports_remote_url(tmp_path, monkeypatch) -
 
 
 def test_load_skeleton_sequence_npz_surfaces_remote_http_errors(monkeypatch) -> None:
-    def _fake_urlopen(url: str, timeout: int = 30):
+    def _fake_urlopen(url: str, timeout: int):
         assert url == "https://example.com/forbidden.npz"
-        assert timeout == 30
+        assert timeout == 60
         raise HTTPError(url, 403, "Forbidden", hdrs=None, fp=None)
 
     monkeypatch.setattr("sam_3d_body.technique_alignment.urlopen", _fake_urlopen)
 
     with pytest.raises(ConnectionError, match="HTTP 403"):
         load_skeleton_sequence_npz("https://example.com/forbidden.npz")
+
+
+@pytest.mark.parametrize("failure", [
+    TimeoutError("secret URL"),
+    URLError(TimeoutError("secret URL")),
+    ConnectionResetError("secret URL"),
+    HTTPError("https://example.com/private?signature=secret", 503, "Unavailable", None, None),
+])
+def test_remote_asset_retries_transient_failure(monkeypatch, failure) -> None:
+    attempts = []
+    delays = []
+
+    def fetch(url, timeout):
+        attempts.append(timeout)
+        if len(attempts) == 1:
+            raise failure
+        return io.BytesIO(b"complete asset")
+
+    monkeypatch.setattr("sam_3d_body.technique_alignment.urlopen", fetch)
+    monkeypatch.setattr("sam_3d_body.technique_alignment.time.sleep", delays.append)
+    with resolve_npz_file("https://example.com/reference.render.npz") as path:
+        assert path.read_bytes() == b"complete asset"
+    assert not path.exists()
+    assert attempts == [60, 60]
+    assert delays == [1]
+
+
+def test_remote_asset_restarts_partial_download(monkeypatch) -> None:
+    calls = []
+
+    class PartialResponse(io.BytesIO):
+        def read(self, size=-1):
+            if self.tell():
+                raise TimeoutError("interrupted")
+            return super().read(size)
+
+    def fetch(url, timeout):
+        calls.append(url)
+        return PartialResponse(b"partial junk") if len(calls) == 1 else io.BytesIO(b"ok")
+
+    monkeypatch.setattr("sam_3d_body.technique_alignment.urlopen", fetch)
+    monkeypatch.setattr("sam_3d_body.technique_alignment.time.sleep", lambda _: None)
+    with resolve_npz_file("https://example.com/reference.render.npz") as path:
+        assert path.read_bytes() == b"ok"
+    assert len(calls) == 2
+    assert not path.exists()
+
+
+def test_remote_asset_exhausts_retries_without_exposing_signed_url(monkeypatch, tmp_path) -> None:
+    calls = []
+    signed_url = "https://example.com/private.npz?X-Amz-Signature=secret"
+
+    def fetch(url, timeout):
+        calls.append(url)
+        raise URLError(TimeoutError(signed_url))
+
+    monkeypatch.setattr("sam_3d_body.technique_alignment.urlopen", fetch)
+    monkeypatch.setattr("sam_3d_body.technique_alignment.time.sleep", lambda _: None)
+    monkeypatch.setattr("sam_3d_body.technique_alignment.tempfile.tempdir", str(tmp_path))
+    with pytest.raises(TimeoutError) as caught:
+        with resolve_npz_file(signed_url):
+            pytest.fail("must not yield an incomplete asset")
+    assert len(calls) == 3
+    assert str(caught.value) == "Timed out fetching 3D reference asset"
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("status,exception", [(403, ConnectionError), (404, FileNotFoundError)])
+def test_remote_asset_does_not_retry_permanent_http_failure(monkeypatch, status, exception) -> None:
+    calls = []
+
+    def fetch(url, timeout):
+        calls.append(url)
+        raise HTTPError(url, status, "secret", None, None)
+
+    monkeypatch.setattr("sam_3d_body.technique_alignment.urlopen", fetch)
+    with pytest.raises(exception) as caught:
+        with resolve_npz_file("https://example.com/private?signature=secret"):
+            pytest.fail("must not yield")
+    assert len(calls) == 1
+    assert "secret" not in str(caught.value)
+    assert "https" not in str(caught.value)
+
+
+def test_remote_asset_preserves_consumer_error_without_retry(monkeypatch) -> None:
+    calls = []
+
+    def fetch(url, timeout):
+        calls.append(url)
+        return io.BytesIO(b"asset")
+
+    monkeypatch.setattr("sam_3d_body.technique_alignment.urlopen", fetch)
+    failure = ValueError("invalid render fields")
+    with pytest.raises(ValueError) as caught:
+        with resolve_npz_file("https://example.com/reference.render.npz") as path:
+            raise failure
+    assert caught.value is failure
+    assert len(calls) == 1
+    assert not path.exists()
