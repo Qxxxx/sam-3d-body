@@ -25,6 +25,7 @@ from api.main import (
     _emit_inference_failure_event,
     _emit_trace_event,
     _run_video_inference_sync,
+    _upload_file_to_target,
     create_app,
 )
 from api.models import VideoInferenceRequest
@@ -1322,3 +1323,55 @@ def test_infer_video_jobs_retry_callback_and_recover_after_restart(
         assert payload["callbackDelivery"]["attempts"] >= 2
         assert payload["callbackDelivery"]["deliveredAt"] is not None
         assert delivered_attempts == ["succeeded"]
+
+
+@pytest.mark.parametrize("failure", ["disconnect", "timeout", "503"])
+def test_artifact_upload_retries_same_target_after_transient_failure(tmp_path: Path, monkeypatch: Any, failure: str) -> None:
+    artifact = tmp_path / "render.npz"
+    artifact.write_bytes(b"generated-render")
+    target = "https://uploads.example/render.npz?signature=private"
+    calls: list[tuple[str, bytes]] = []
+    def upload(url: str, **kwargs: Any) -> httpx.Response:
+        calls.append((url, kwargs["content"]))
+        if len(calls) == 1:
+            if failure == "disconnect":
+                raise httpx.RemoteProtocolError("Server disconnected")
+            if failure == "timeout":
+                raise httpx.ReadTimeout("Read timeout")
+            return httpx.Response(503, request=httpx.Request("PUT", url))
+        return httpx.Response(200, request=httpx.Request("PUT", url))
+    monkeypatch.setattr("api.main.httpx.put", upload)
+    monkeypatch.setattr("api.main.time.sleep", lambda _: None)
+    _upload_file_to_target(path=artifact, put_url=target, content_type="application/octet-stream")
+    assert calls == [(target, b"generated-render"), (target, b"generated-render")]
+
+
+def test_artifact_upload_does_not_retry_signature_denial_or_expose_signed_url(tmp_path: Path, monkeypatch: Any) -> None:
+    artifact = tmp_path / "render.npz"
+    artifact.write_bytes(b"render")
+    calls = []
+    def upload(url: str, **kwargs: Any) -> httpx.Response:
+        calls.append(url)
+        return httpx.Response(403, request=httpx.Request("PUT", url))
+    monkeypatch.setattr("api.main.httpx.put", upload)
+    with pytest.raises(ConnectionError, match="HTTP 403") as error:
+        _upload_file_to_target(path=artifact, put_url="https://uploads.example/render?signature=secret", content_type=None)
+    assert len(calls) == 1
+    assert "secret" not in str(error.value)
+    assert "https://" not in str(error.value)
+
+
+def test_artifact_upload_bounds_transport_retries_and_redacts_errors(tmp_path: Path, monkeypatch: Any) -> None:
+    artifact = tmp_path / "render.npz"
+    artifact.write_bytes(b"render")
+    calls = []
+    def upload(url: str, **kwargs: Any) -> httpx.Response:
+        calls.append(url)
+        raise httpx.RemoteProtocolError(f"Disconnected from {url}")
+    monkeypatch.setattr("api.main.httpx.put", upload)
+    monkeypatch.setattr("api.main.time.sleep", lambda _: None)
+    with pytest.raises(ConnectionError, match="RemoteProtocolError") as error:
+        _upload_file_to_target(path=artifact, put_url="https://uploads.example/render?signature=secret", content_type=None)
+    assert len(calls) == 3
+    assert "secret" not in str(error.value)
+    assert "https://" not in str(error.value)

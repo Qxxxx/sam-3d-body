@@ -411,23 +411,42 @@ def _upload_file_to_target(
     if content_type is not None:
         headers["Content-Type"] = content_type
 
-    try:
-        response = httpx.put(
-            put_url,
-            content=resolved_path.read_bytes(),
-            headers=headers,
-            follow_redirects=True,
-            timeout=120.0,
-        )
-        response.raise_for_status()
-    except httpx.TimeoutException as exc:
-        raise TimeoutError(
-            f"Timed out uploading generated artifact to {put_url}"
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise ConnectionError(
-            f"Failed to upload generated artifact to {put_url}: {exc}"
-        ) from exc
+    # Repeating a PUT to this same signed target replaces the same artifact.
+    # Retry transport interruptions and transient upstream failures without
+    # repeating GPU inference or creating another storage object.
+    content = resolved_path.read_bytes()
+    for attempt in range(3):
+        try:
+            response = httpx.put(
+                put_url,
+                content=content,
+                headers=headers,
+                follow_redirects=True,
+                timeout=120.0,
+            )
+            response.raise_for_status()
+            return
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in {429, 500, 502, 503, 504} and attempt < 2:
+                time.sleep(2**attempt)
+                continue
+            raise ConnectionError(
+                f"Generated artifact upload failed (HTTP {status}, attempts={attempt + 1})"
+            ) from exc
+        except httpx.TransportError as exc:
+            if attempt < 2:
+                time.sleep(2**attempt)
+                continue
+            # Exception messages may include signed URLs. Keep them out of the
+            # public job error and retain only the transport class for diagnosis.
+            if isinstance(exc, httpx.TimeoutException):
+                raise TimeoutError(
+                    "Timed out uploading generated artifact after 3 attempts"
+                ) from exc
+            raise ConnectionError(
+                f"Generated artifact upload failed after 3 attempts ({type(exc).__name__})"
+            ) from exc
 
 
 def _upload_generated_artifact(
@@ -458,7 +477,7 @@ def _upload_generated_artifact(
                 "assetId": asset_id,
                 "artifactType": artifact_type,
                 "path": str(path),
-                "putUrl": put_url,
+                "uploadRetryLimit": 3,
                 "fetchUrl": fetch_url,
                 "contentType": content_type,
                 "detail": str(exc),
