@@ -29,6 +29,7 @@ class ApiSettings:
     runtime_env: str = "gpu-server"
     job_concurrency: int = 1
     account_deletion_token: str | None = None
+    reference_cache_root: str = str(Path.home() / ".cache" / "sam3d-body" / "references")
 
 
 def _read_bool_env(name: str, default: bool) -> bool:
@@ -78,4 +79,8 @@ def load_api_settings() -> ApiSettings:
         or "gpu-server",
         account_deletion_token=os.getenv("SAM3DBODY_ACCOUNT_DELETION_TOKEN", "").strip() or None,
         job_concurrency=_read_positive_int_env("SAM3DBODY_JOB_CONCURRENCY", 1),
+        reference_cache_root=os.getenv(
+            "SAM3DBODY_REFERENCE_CACHE_ROOT",
+            str(Path.home() / ".cache" / "sam3d-body" / "references"),
+        ),
     )

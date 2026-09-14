@@ -141,6 +141,9 @@ class ViewerComparisonConfigModel(BaseModel):
 
     reference_skeleton_path: str = Field(alias="referenceSkeletonPath")
     reference_render_path: str = Field(alias="referenceRenderPath")
+    reference_asset_version: str | None = Field(
+        default=None, alias="referenceAssetVersion", min_length=1, max_length=256
+    )
     reference_label: str = Field(default="标准动作", alias="referenceLabel")
     uploads: dict[str, VideoAssetUploadTargetModel]
 

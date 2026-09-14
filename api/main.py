@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, suppress
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -36,9 +36,11 @@ from sam_3d_body.technique_alignment import (
     save_alignment_report_json,
 )
 from poc.alignment_3d_viewer.export_assets import export_assets as export_viewer_assets
+from poc.alignment_3d_viewer.export_assets import _load_render_asset
 from sam_3d_body.utils.logging import configure_logging, get_pylogger, log_event
 
 from .config import ApiSettings, load_api_settings
+from .reference_cache import prepare_reference_asset
 from .account_erasure import AccountErasure
 from .models import (
     GeneratedAssetFileModel,
@@ -624,7 +626,32 @@ def _run_video_inference_sync(
     payload: VideoInferenceRequest,
     trace_context: TechniqueTraceContext,
 ) -> dict[str, Any]:
-    with state.account_erasure.processing(trace_context.user_id):
+    with state.account_erasure.processing(trace_context.user_id), ExitStack() as references:
+        if payload.viewer_comparison is not None:
+            _emit_trace_event(
+                state.settings, trace_context, stage="reference_assets_prepare_started",
+                message="Preparing reference assets before video inference",
+            )
+            comparison = payload.viewer_comparison
+            resolved = {}
+            for field_name, kind, validate in (
+                ("reference_skeleton_path", "skeleton", load_skeleton_sequence_npz),
+                ("reference_render_path", "render", _load_render_asset),
+            ):
+                resolved[field_name] = str(references.enter_context(prepare_reference_asset(
+                    getattr(comparison, field_name),
+                    cache_root=Path(state.settings.reference_cache_root),
+                    version=comparison.reference_asset_version,
+                    kind=kind,
+                    validate=validate,
+                )))
+            payload = payload.model_copy(update={
+                "viewer_comparison": comparison.model_copy(update=resolved),
+            })
+            _emit_trace_event(
+                state.settings, trace_context, stage="reference_assets_ready",
+                message="Reference skeleton and render are available locally",
+            )
         return _run_video_inference_sync_impl(state, payload, trace_context)
 
 
