@@ -28,6 +28,60 @@ def _make_sequence(frames: np.ndarray) -> SkeletonSequence:
     )
 
 
+def _mhr70_frames() -> np.ndarray:
+    frames = np.zeros((3, 70, 3), dtype=np.float32)
+    for index, value in {
+        0: [0, 1.3, 0], 1: [-0.04, 1.25, 0.03], 2: [0.04, 1.25, 0.03],
+        3: [-0.1, 1.2, 0], 9: [-0.2, 0, 0], 10: [0.2, 0, 0],
+        11: [-0.2, -0.5, 0], 12: [0.2, -0.5, 0],
+        13: [-0.2, -1, 0], 14: [0.2, -1, 0], 69: [0, 1, 0],
+    }.items():
+        frames[:, index] = value
+    # A changing arm pose must not rescale the whole body.
+    frames[:, 7] = [[-0.5, 0.5, 0], [-0.7, 0.5, 0], [-1, 0.5, 0]]
+    return frames
+
+
+def test_mhr70_matching_uses_hip_midpoint_and_stable_body_scale() -> None:
+    normalized = normalize_skeleton_sequence(_make_sequence(_mhr70_frames()))
+    np.testing.assert_allclose((normalized[:, 9] + normalized[:, 10]) / 2, 0, atol=1e-6)
+    np.testing.assert_allclose(normalized[:, 69, 1], 1 / 2.3, atol=1e-6)
+    np.testing.assert_allclose(normalized[:, 10, 0] - normalized[:, 9, 0], 0.4 / 2.3, atol=1e-6)
+    assert normalized[0, 7, 0] != normalized[-1, 7, 0]
+
+
+def test_mhr70_matching_is_invariant_to_capture_rotation_translation_and_scale() -> None:
+    original = _mhr70_frames()
+    rotation = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]], dtype=np.float32)
+    transformed = original @ rotation * 1.7 + [4, 8, -3]
+    report = build_alignment_report(
+        _make_sequence(original), _make_sequence(transformed),
+        AlignmentConfig(use_fastdtw=False),
+    )
+    assert report["summary"]["meanFrameError"] < 1e-6
+    assert [(step["userFrameIndex"], step["referenceFrameIndex"]) for step in report["alignmentPath"]] == [(0, 0), (1, 1), (2, 2)]
+
+
+def test_eye_positions_do_not_define_mhr70_body_orientation() -> None:
+    original = _mhr70_frames()
+    changed = original.copy()
+    changed[:, 1:4] += [0.5, 0.3, 0.7]
+    before = normalize_skeleton_sequence(_make_sequence(original))
+    after = normalize_skeleton_sequence(_make_sequence(changed))
+    np.testing.assert_allclose(before[:, 5:], after[:, 5:], atol=1e-6)
+
+
+def test_mhr70_matching_rejects_unusable_geometry() -> None:
+    invalid = _mhr70_frames()
+    invalid[:, 10] = invalid[:, 9]
+    with pytest.raises(ValueError, match="body basis"):
+        normalize_skeleton_sequence(_make_sequence(invalid))
+    invalid = _mhr70_frames()
+    invalid[0, 7, 0] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        normalize_skeleton_sequence(_make_sequence(invalid))
+
+
 def test_normalization_keeps_root_at_origin_and_aligns_hips() -> None:
     frames = np.array(
         [

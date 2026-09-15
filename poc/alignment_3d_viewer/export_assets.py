@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from sam_3d_body.technique_alignment import resolve_npz_file
+from sam_3d_body.technique_alignment import mhr70_body_scale, resolve_npz_file
 
 
 # SAM-3D-Body's persisted 70-keypoint payload follows metadata/mhr70.py.
@@ -99,21 +99,7 @@ def _body_basis(keypoints: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def sequence_body_scale(keypoints: np.ndarray) -> float:
     """Return one pose-invariant body scale for an entire MHR70 sequence."""
-    keypoints = np.asarray(keypoints, dtype=np.float32)
-    pelvis = (keypoints[:, LEFT_HIP_INDEX] + keypoints[:, RIGHT_HIP_INDEX]) * 0.5
-    torso = np.linalg.norm(keypoints[:, UP_JOINT_INDEX] - pelvis, axis=1)
-    head = np.linalg.norm(keypoints[:, 0] - keypoints[:, UP_JOINT_INDEX], axis=1)
-    left_leg = np.linalg.norm(keypoints[:, 9] - keypoints[:, 11], axis=1) + np.linalg.norm(
-        keypoints[:, 11] - keypoints[:, 13], axis=1
-    )
-    right_leg = np.linalg.norm(
-        keypoints[:, 10] - keypoints[:, 12], axis=1
-    ) + np.linalg.norm(keypoints[:, 12] - keypoints[:, 14], axis=1)
-    chain_length = torso + head + (left_leg + right_leg) * 0.5
-    valid = chain_length[np.isfinite(chain_length) & (chain_length > EPSILON)]
-    if valid.size == 0:
-        raise ValueError("Unable to derive a valid body scale from MHR70 keypoints")
-    return max(float(np.median(valid)), EPSILON)
+    return mhr70_body_scale(keypoints)
 
 
 def canonicalize_mesh_frames(

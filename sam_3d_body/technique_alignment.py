@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http.client import IncompleteRead
 from pathlib import Path
 from socket import timeout as SocketTimeout
@@ -72,13 +72,37 @@ class NormalizationConfig:
     up_joint_index: int = 3
     smooth_window: int = 3
     eps: float = 1e-6
+    mhr70_layout: bool = False
 
 
 @dataclass
 class AlignmentConfig:
     dtw_radius: int = 5
     use_fastdtw: bool = True
-    normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
+    normalization: NormalizationConfig | None = None
+
+
+def mhr70_body_scale(keypoints: np.ndarray) -> float:
+    """One body-chain scale per clip, shared by matching and mesh rendering."""
+    keypoints = np.asarray(keypoints, dtype=np.float32)
+    if keypoints.ndim != 3 or keypoints.shape[1:] != (70, 3):
+        raise ValueError("Expected MHR70 keypoints with shape [frames, 70, 3]")
+    if not np.isfinite(keypoints).all():
+        raise ValueError("MHR70 keypoints must be finite")
+    pelvis = (keypoints[:, 9] + keypoints[:, 10]) * 0.5
+    torso = np.linalg.norm(keypoints[:, 69] - pelvis, axis=1)
+    head = np.linalg.norm(keypoints[:, 0] - keypoints[:, 69], axis=1)
+    left_leg = np.linalg.norm(keypoints[:, 9] - keypoints[:, 11], axis=1) + np.linalg.norm(
+        keypoints[:, 11] - keypoints[:, 13], axis=1
+    )
+    right_leg = np.linalg.norm(keypoints[:, 10] - keypoints[:, 12], axis=1) + np.linalg.norm(
+        keypoints[:, 12] - keypoints[:, 14], axis=1
+    )
+    chain_length = torso + head + (left_leg + right_leg) * 0.5
+    valid = chain_length[np.isfinite(chain_length) & (chain_length > 1e-6)]
+    if valid.size == 0:
+        raise ValueError("Unable to derive a valid body scale from MHR70 keypoints")
+    return float(np.median(valid))
 
 
 def _safe_joint_index(index: int, num_joints: int) -> int:
@@ -137,9 +161,25 @@ def normalize_skeleton_sequence(
     sequence: SkeletonSequence,
     config: NormalizationConfig | None = None,
 ) -> np.ndarray:
-    config = config or NormalizationConfig()
+    config = config or NormalizationConfig(mhr70_layout=sequence.num_joints == 70)
     keypoints = np.asarray(sequence.keypoints_3d, dtype=np.float32).copy()
     num_joints = keypoints.shape[1]
+
+    if config.mhr70_layout:
+        scale = mhr70_body_scale(keypoints)
+        # Persisted SAM-3D keypoints have no pelvis joint. Nose/eyes/ear at
+        # indices 0/1/2/3 must never be used as the legacy root/hips/up joints.
+        root = (keypoints[:, 9] + keypoints[:, 10]) * 0.5
+        centered = keypoints - root[:, None, :]
+        normalized = np.empty_like(centered)
+        for frame_idx, frame in enumerate(centered):
+            hips_vec = frame[10] - frame[9]
+            up_vec = frame[69]
+            if np.linalg.norm(np.cross(hips_vec, up_vec)) <= config.eps:
+                raise ValueError("MHR70 hips and neck cannot define a body basis")
+            basis = _orthonormal_basis(hips_vec, up_vec, config.eps)
+            normalized[frame_idx] = (frame @ basis) / scale
+        return _smooth_sequence(normalized, config.smooth_window)
 
     root_idx = _safe_joint_index(config.root_joint_index, num_joints)
     lhip_idx = _safe_joint_index(config.left_hip_index, num_joints)
