@@ -20,6 +20,10 @@ from pydantic import ValidationError
 
 from api.config import ApiSettings, load_api_settings
 from api.main import (
+    ARTIFACT_UPLOAD_ATTEMPTS,
+    ARTIFACT_UPLOAD_READ_TIMEOUT_SECONDS,
+    ARTIFACT_UPLOAD_TIMEOUT,
+    ARTIFACT_UPLOAD_WRITE_TIMEOUT_SECONDS,
     TechniqueTraceContext,
     _build_estimator,
     _emit_inference_failure_event,
@@ -381,11 +385,11 @@ def test_run_video_inference_sync_uploads_generated_files_for_direct_upload(
         content: bytes,
         headers: dict[str, str],
         follow_redirects: bool,
-        timeout: float,
+        timeout: Any,
     ) -> httpx.Response:
         uploaded_requests.append((url, bytes(content), dict(headers)))
         assert follow_redirects is True
-        assert timeout == 120.0
+        assert timeout == ARTIFACT_UPLOAD_TIMEOUT
         return httpx.Response(200, request=httpx.Request("PUT", url))
 
     monkeypatch.setattr("api.main.httpx.put", _fake_httpx_put)
@@ -478,11 +482,11 @@ def test_run_video_inference_sync_uploads_cropped_video_when_requested(
         content: bytes,
         headers: dict[str, str],
         follow_redirects: bool,
-        timeout: float,
+        timeout: Any,
     ) -> httpx.Response:
         uploaded_requests.append((url, bytes(content), dict(headers)))
         assert follow_redirects is True
-        assert timeout == 120.0
+        assert timeout == ARTIFACT_UPLOAD_TIMEOUT
         return httpx.Response(200, request=httpx.Request("PUT", url))
 
     monkeypatch.setattr("api.main.httpx.put", _fake_httpx_put)
@@ -570,10 +574,10 @@ def test_run_video_inference_sync_emits_trace_events_with_request_context(
         content: bytes,
         headers: dict[str, str],
         follow_redirects: bool,
-        timeout: float,
+        timeout: Any,
     ) -> httpx.Response:
         assert follow_redirects is True
-        assert timeout == 120.0
+        assert timeout == ARTIFACT_UPLOAD_TIMEOUT
         return httpx.Response(200, request=httpx.Request("PUT", url))
 
     def _capture_trace_event(_settings: Any, _context: Any, **kwargs: Any) -> None:
@@ -853,6 +857,7 @@ def test_run_video_inference_sync_emits_artifact_upload_failed_trace_event(
     _write_dummy_video(video_path, fps=10.0, num_frames=8)
     artifact_root = tmp_path / "artifacts"
     trace_events: list[tuple[str, dict[str, Any] | None]] = []
+    upload_timeouts: list[float] = []
 
     def _fake_httpx_put(
         url: str,
@@ -860,8 +865,9 @@ def test_run_video_inference_sync_emits_artifact_upload_failed_trace_event(
         content: bytes,
         headers: dict[str, str],
         follow_redirects: bool,
-        timeout: float,
+        timeout: Any,
     ) -> httpx.Response:
+        upload_timeouts.append(timeout)
         raise httpx.TimeoutException("upload timed out")
 
     def _capture_trace_event(_settings: Any, _context: Any, **kwargs: Any) -> None:
@@ -921,6 +927,12 @@ def test_run_video_inference_sync_emits_artifact_upload_failed_trace_event(
             request,
             TechniqueTraceContext(trace_id="tech-trace-unit-test"),
         )
+
+    # A stalled connection must be detected by the read timeout instead of
+    # hanging for the whole write budget, while the body write keeps a long one.
+    assert upload_timeouts == [ARTIFACT_UPLOAD_TIMEOUT] * ARTIFACT_UPLOAD_ATTEMPTS
+    assert ARTIFACT_UPLOAD_READ_TIMEOUT_SECONDS == 60.0
+    assert ARTIFACT_UPLOAD_WRITE_TIMEOUT_SECONDS == 180.0
 
     stages = [stage for stage, _meta in trace_events]
     assert "direct_upload_started" in stages
@@ -1372,7 +1384,7 @@ def test_artifact_upload_bounds_transport_retries_and_redacts_errors(tmp_path: P
     monkeypatch.setattr("api.main.time.sleep", lambda _: None)
     with pytest.raises(ConnectionError, match="RemoteProtocolError") as error:
         _upload_file_to_target(path=artifact, put_url="https://uploads.example/render?signature=secret", content_type=None)
-    assert len(calls) == 3
+    assert len(calls) == ARTIFACT_UPLOAD_ATTEMPTS
     assert "secret" not in str(error.value)
     assert "https://" not in str(error.value)
 

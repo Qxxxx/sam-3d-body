@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--user-label", default="IMG_3194")
     parser.add_argument("--reference-label", default="Fan Zhendong")
     parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument(
+        "--positions-mode",
+        choices=("canonical", "raw-alias"),
+        default="canonical",
+        help="canonical exports the normalized buffers as well; raw-alias skips them.",
+    )
     return parser.parse_args()
 
 
@@ -245,9 +251,17 @@ def export_assets(
     user_label: str,
     reference_label: str,
     fps: float,
+    positions_mode: str = "canonical",
+    shared_keys: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     if fps <= 0:
         raise ValueError("fps must be positive")
+    if positions_mode not in {"canonical", "raw-alias"}:
+        raise ValueError("positions_mode must be 'canonical' or 'raw-alias'")
+    # Manifest keys whose buffers already exist as shared objects: skip writing
+    # them so the caller never has to upload a copy. The manifest still lists a
+    # file name for each key; the caller replaces the value with the shared URL.
+    skipped_keys = {str(key) for key in shared_keys}
 
     user = _load_render_asset(user_render_path)
     reference = _load_render_asset(reference_render_path)
@@ -324,35 +338,54 @@ def export_assets(
     user_camera_intrinsics_buffer_name = "user.camera.intrinsics.f32.bin"
     reference_camera_intrinsics_buffer_name = "reference.camera.intrinsics.f32.bin"
     index_buffer_name = "mesh.indices.u32.bin"
-    _write_float_buffer(output_dir / user_buffer_name, user_positions)
-    _write_float_buffer(output_dir / reference_buffer_name, reference_positions)
-    _write_float_buffer(output_dir / user_raw_buffer_name, user_raw_positions)
-    _write_float_buffer(output_dir / reference_raw_buffer_name, reference_raw_positions)
-    _write_float_buffer(output_dir / user_basis_buffer_name, user_bases)
-    _write_float_buffer(output_dir / reference_basis_buffer_name, reference_bases)
-    _write_float_buffer(
-        output_dir / user_camera_position_buffer_name, user_vertices
-    )
-    _write_float_buffer(
-        output_dir / reference_camera_position_buffer_name,
+    # The normalized buffers are only kept as the manifest's `userPositions` /
+    # `referencePositions` entries when the caller asks for them. Every viewer
+    # (web runtime, POC app.js, iOS SAM3DViewerModels) renders the raw buffers, so
+    # `raw-alias` skips ~2 x 26 MB of per-task upload and points those manifest
+    # keys at the raw files instead. The normalized arrays are still computed
+    # above because the framing bounds come from them.
+    export_normalized_positions = positions_mode == "canonical"
+
+    def write_float(key: str, file_name: str, values: np.ndarray) -> None:
+        if key in skipped_keys:
+            return
+        _write_float_buffer(output_dir / file_name, values)
+
+    if export_normalized_positions and "userPositions" not in skipped_keys:
+        _write_float_buffer(output_dir / user_buffer_name, user_positions)
+        _write_float_buffer(output_dir / reference_buffer_name, reference_positions)
+    write_float("userRawPositions", user_raw_buffer_name, user_raw_positions)
+    write_float("referenceRawPositions", reference_raw_buffer_name, reference_raw_positions)
+    write_float("userBasis", user_basis_buffer_name, user_bases)
+    write_float("referenceBasis", reference_basis_buffer_name, reference_bases)
+    write_float("userCameraPositions", user_camera_position_buffer_name, user_vertices)
+    write_float(
+        "referenceCameraPositions",
+        reference_camera_position_buffer_name,
         reference_vertices,
     )
-    _write_float_buffer(
-        output_dir / user_camera_translation_buffer_name, user_camera_translation
+    write_float(
+        "userCameraTranslation",
+        user_camera_translation_buffer_name,
+        user_camera_translation,
     )
-    _write_float_buffer(
-        output_dir / reference_camera_translation_buffer_name,
+    write_float(
+        "referenceCameraTranslation",
+        reference_camera_translation_buffer_name,
         reference_camera_translation,
     )
-    _write_float_buffer(
-        output_dir / user_camera_intrinsics_buffer_name,
+    write_float(
+        "userCameraIntrinsics",
+        user_camera_intrinsics_buffer_name,
         user["cam_intrinsics"],
     )
-    _write_float_buffer(
-        output_dir / reference_camera_intrinsics_buffer_name,
+    write_float(
+        "referenceCameraIntrinsics",
+        reference_camera_intrinsics_buffer_name,
         reference["cam_intrinsics"],
     )
-    _write_index_buffer(output_dir / index_buffer_name, user_faces)
+    if "indices" not in skipped_keys:
+        _write_index_buffer(output_dir / index_buffer_name, user_faces)
 
     compact_steps = [
         {
@@ -387,6 +420,10 @@ def export_assets(
         },
         "normalization": {
             "method": "skeletal-chain-v1",
+            # Documents why `files.userPositions` may name the raw buffer: no
+            # viewer consumes the normalized export, so callers that ask for
+            # `raw-alias` ship one file per subject instead of two.
+            "positionsExport": positions_mode,
             "root": "midpoint(leftHip, rightHip)",
             "leftHipIndex": LEFT_HIP_INDEX,
             "rightHipIndex": RIGHT_HIP_INDEX,
@@ -434,8 +471,14 @@ def export_assets(
         },
         "bounds": _bounds(user_positions, reference_positions),
         "files": {
-            "userPositions": user_buffer_name,
-            "referencePositions": reference_buffer_name,
+            "userPositions": (
+                user_buffer_name if export_normalized_positions else user_raw_buffer_name
+            ),
+            "referencePositions": (
+                reference_buffer_name
+                if export_normalized_positions
+                else reference_raw_buffer_name
+            ),
             "userRawPositions": user_raw_buffer_name,
             "referenceRawPositions": reference_raw_buffer_name,
             "userBasis": user_basis_buffer_name,
@@ -465,6 +508,7 @@ def main() -> None:
         user_label=args.user_label,
         reference_label=args.reference_label,
         fps=args.fps,
+        positions_mode=args.positions_mode,
     )
     print(
         json.dumps(

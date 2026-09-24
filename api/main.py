@@ -404,12 +404,38 @@ def _build_local_file_descriptor(
     )
 
 
+# Viewer artifacts are mostly float32 position arrays (15-26 MB each) and the
+# GPU host's uplink to R2 is both slow and unreliable: individual PUTs have been
+# observed stalling for minutes with no bytes transferred, on files as small as
+# 2.5 KB. A single long timeout therefore does not help - it only converts a
+# stall into a multi-minute wait before the retry. Give writing the body a
+# generous budget, but fail a stalled connection quickly so the retry can use a
+# fresh one, and keep the total inside the API's 30 minute remote task timeout.
+ARTIFACT_UPLOAD_CONNECT_TIMEOUT_SECONDS = 15.0
+ARTIFACT_UPLOAD_READ_TIMEOUT_SECONDS = 60.0
+ARTIFACT_UPLOAD_WRITE_TIMEOUT_SECONDS = 180.0
+ARTIFACT_UPLOAD_ATTEMPTS = 5
+ARTIFACT_UPLOAD_TIMEOUT = httpx.Timeout(
+    connect=ARTIFACT_UPLOAD_CONNECT_TIMEOUT_SECONDS,
+    read=ARTIFACT_UPLOAD_READ_TIMEOUT_SECONDS,
+    write=ARTIFACT_UPLOAD_WRITE_TIMEOUT_SECONDS,
+    pool=ARTIFACT_UPLOAD_CONNECT_TIMEOUT_SECONDS,
+)
+
+
 def _upload_file_to_target(
     *,
     path: Path,
     put_url: str,
     content_type: str | None,
 ) -> None:
+    """
+    PUT one generated artifact to its signed target.
+
+    Viewer artifacts are large and leave this host over a slow, occasionally
+    stalling uplink, so the timeout shape matters more than its total length:
+    see ARTIFACT_UPLOAD_TIMEOUT above.
+    """
     resolved_path = path.resolve()
     headers: dict[str, str] = {}
     if content_type is not None:
@@ -419,37 +445,37 @@ def _upload_file_to_target(
     # Retry transport interruptions and transient upstream failures without
     # repeating GPU inference or creating another storage object.
     content = resolved_path.read_bytes()
-    for attempt in range(3):
+    for attempt in range(ARTIFACT_UPLOAD_ATTEMPTS):
         try:
             response = httpx.put(
                 put_url,
                 content=content,
                 headers=headers,
                 follow_redirects=True,
-                timeout=120.0,
+                timeout=ARTIFACT_UPLOAD_TIMEOUT,
             )
             response.raise_for_status()
             return
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
-            if status in {429, 500, 502, 503, 504} and attempt < 2:
+            if status in {429, 500, 502, 503, 504} and attempt < ARTIFACT_UPLOAD_ATTEMPTS - 1:
                 time.sleep(2**attempt)
                 continue
             raise ConnectionError(
                 f"Generated artifact upload failed (HTTP {status}, attempts={attempt + 1})"
             ) from exc
         except httpx.TransportError as exc:
-            if attempt < 2:
+            if attempt < ARTIFACT_UPLOAD_ATTEMPTS - 1:
                 time.sleep(2**attempt)
                 continue
             # Exception messages may include signed URLs. Keep them out of the
             # public job error and retain only the transport class for diagnosis.
             if isinstance(exc, httpx.TimeoutException):
                 raise TimeoutError(
-                    "Timed out uploading generated artifact after 3 attempts"
+                    f"Timed out uploading generated artifact after {ARTIFACT_UPLOAD_ATTEMPTS} attempts"
                 ) from exc
             raise ConnectionError(
-                f"Generated artifact upload failed after 3 attempts ({type(exc).__name__})"
+                f"Generated artifact upload failed after {ARTIFACT_UPLOAD_ATTEMPTS} attempts ({type(exc).__name__})"
             ) from exc
 
 
@@ -752,12 +778,24 @@ def _run_video_inference_sync_impl(
             user_label="你的动作",
             reference_label=payload.viewer_comparison.reference_label,
             fps=float(bundle.asset_metadata["sourceFps"]),
+            # Callers opt in; without the flag the manifest keeps the normalized
+            # buffers so already-deployed clients are unaffected.
+            positions_mode=payload.viewer_comparison.positions_export or "canonical",
+            # Reference-side buffers that already exist as shared objects are
+            # neither written here nor uploaded per task - the manifest points at
+            # the shared URL instead, and the GPU host never downloads a copy.
+            shared_keys=set(payload.viewer_comparison.shared_files or {}),
         )
 
         viewer_files = viewer_manifest.get("files")
         if not isinstance(viewer_files, dict):
             raise ValueError("Generated viewer manifest is missing files.")
-        required_names = {str(value) for value in viewer_files.values()}
+        shared_files = dict(payload.viewer_comparison.shared_files or {})
+        required_names = {
+            str(file_name)
+            for key, file_name in viewer_files.items()
+            if key not in shared_files
+        }
         required_names.add("viewer-data.json")
         configured_names = set(payload.viewer_comparison.uploads)
         if configured_names != required_names:
@@ -765,7 +803,11 @@ def _run_video_inference_sync_impl(
                 "viewerComparison.uploads must match all generated viewer files."
             )
         viewer_manifest["files"] = {
-            key: payload.viewer_comparison.uploads[str(file_name)].fetch_url
+            key: (
+                shared_files[key]
+                if key in shared_files
+                else payload.viewer_comparison.uploads[str(file_name)].fetch_url
+            )
             for key, file_name in viewer_files.items()
         }
         (viewer_output_dir / "viewer-data.json").write_text(

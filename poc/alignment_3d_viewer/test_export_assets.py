@@ -98,6 +98,90 @@ class CanonicalMeshExportTests(unittest.TestCase):
                 with self.subTest(filename=filename):
                     self.assertGreater((output / filename).stat().st_size, 0)
 
+    def test_raw_alias_export_skips_normalized_buffers(self) -> None:
+        """No viewer renders the normalized buffers, so a caller can skip them.
+
+        The two `*Positions` keys then name the raw buffers, which is what every
+        viewer (web runtime, POC app.js, iOS) already loads, so the manifest
+        stays 13 keys while ~2 x 26 MB per task stops being uploaded.
+        """
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            keypoints = np.zeros((3, 70, 3), dtype=np.float32)
+            keypoints[:, 9] = [-0.5, 0.0, 0.0]
+            keypoints[:, 10] = [0.5, 0.0, 0.0]
+            keypoints[:, 11] = [-0.5, -0.5, 0.0]
+            keypoints[:, 12] = [0.5, -0.5, 0.0]
+            keypoints[:, 13] = [-0.5, -1.0, 0.0]
+            keypoints[:, 14] = [0.5, -1.0, 0.0]
+            keypoints[:, 69] = [0.0, 1.0, 0.0]
+            vertices = np.repeat(
+                np.asarray(
+                    [[[-0.5, -1.0, 0.0], [0.5, -1.0, 0.0], [0.0, 1.0, 0.0]]],
+                    dtype=np.float32,
+                ),
+                3,
+                axis=0,
+            )
+            for name in ("user", "reference"):
+                np.savez(
+                    root / f"{name}.render.npz",
+                    vertices_3d=vertices,
+                    faces=np.asarray([[0, 1, 2]], dtype=np.int32),
+                    keypoints_3d=keypoints,
+                    timestamps=np.asarray([0.0, 0.5, 1.0], dtype=np.float32),
+                    cam_t=np.tile(
+                        np.asarray([[0.0, 0.0, 3.0]], dtype=np.float32), (3, 1)
+                    ),
+                    cam_intrinsics=np.repeat(np.eye(3, dtype=np.float32)[None], 3, axis=0),
+                    image_size_hw=np.asarray([720, 1280]),
+                )
+            alignment_path = root / "alignment.json"
+            alignment_path.write_text(
+                json.dumps(
+                    {
+                        "algorithm": "dtw",
+                        "distance": 0.2,
+                        "summary": {"meanFrameError": 0.1},
+                        "alignmentPath": [
+                            {
+                                "userFrameIndex": index,
+                                "referenceFrameIndex": index,
+                                "userTimestamp": index * 0.5,
+                                "referenceTimestamp": index * 0.5,
+                                "distance": (index + 1) * 0.1,
+                            }
+                            for index in range(3)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "output"
+
+            metadata = export_assets(
+                user_render_path=root / "user.render.npz",
+                reference_render_path=root / "reference.render.npz",
+                alignment_path=alignment_path,
+                output_dir=output,
+                user_label="User",
+                reference_label="Reference",
+                fps=3.0,
+                positions_mode="raw-alias",
+            )
+
+            self.assertEqual(metadata["normalization"]["positionsExport"], "raw-alias")
+            self.assertEqual(metadata["files"]["userPositions"], "user.raw.positions.f32.bin")
+            self.assertEqual(
+                metadata["files"]["referencePositions"],
+                "reference.raw.positions.f32.bin",
+            )
+            self.assertFalse((output / "user.positions.f32.bin").exists())
+            self.assertFalse((output / "reference.positions.f32.bin").exists())
+            # Framing still comes from the normalized arrays that stay in memory.
+            self.assertGreater(len(metadata["bounds"]), 0)
+            self.assertTrue((output / metadata["files"]["userRawPositions"]).is_file())
+
     def test_temporal_filter_smooths_impulse_without_frame_delay(self) -> None:
         values = np.asarray([0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
 

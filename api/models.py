@@ -145,6 +145,14 @@ class ViewerComparisonConfigModel(BaseModel):
         default=None, alias="referenceAssetVersion", min_length=1, max_length=256
     )
     reference_label: str = Field(default="标准动作", alias="referenceLabel")
+    positions_export: str | None = Field(
+        default=None, alias="positionsExport", max_length=32
+    )
+    # Manifest keys whose buffers already exist as shared objects (generated once
+    # per reference asset version). Mapping a key to its fetch URL means the
+    # service neither exports nor uploads that file and just points the manifest
+    # at the shared copy.
+    shared_files: dict[str, str] | None = Field(default=None, alias="sharedFiles")
     uploads: dict[str, VideoAssetUploadTargetModel]
 
     @model_validator(mode="after")
@@ -153,6 +161,18 @@ class ViewerComparisonConfigModel(BaseModel):
             raise ValueError("viewerComparison.referenceSkeletonPath is required.")
         if not self.reference_render_path.strip():
             raise ValueError("viewerComparison.referenceRenderPath is required.")
+        if self.positions_export not in (None, "canonical", "raw-alias"):
+            raise ValueError(
+                "viewerComparison.positionsExport must be 'canonical' or 'raw-alias'."
+            )
+        if self.shared_files is not None:
+            if any(
+                not key.strip() or not value.strip()
+                for key, value in self.shared_files.items()
+            ):
+                raise ValueError(
+                    "viewerComparison.sharedFiles must map manifest keys to URLs."
+                )
         if not self.uploads:
             raise ValueError("viewerComparison.uploads is required.")
         return self
