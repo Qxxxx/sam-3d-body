@@ -428,6 +428,7 @@ def _upload_file_to_target(
     path: Path,
     put_url: str,
     content_type: str | None,
+    attempt_metrics: dict[str, int] | None = None,
 ) -> None:
     """
     PUT one generated artifact to its signed target.
@@ -445,7 +446,11 @@ def _upload_file_to_target(
     # Retry transport interruptions and transient upstream failures without
     # repeating GPU inference or creating another storage object.
     content = resolved_path.read_bytes()
+    if attempt_metrics is not None:
+        attempt_metrics["byteCount"] = len(content)
     for attempt in range(ARTIFACT_UPLOAD_ATTEMPTS):
+        if attempt_metrics is not None:
+            attempt_metrics["actualAttempts"] = attempt + 1
         try:
             response = httpx.put(
                 put_url,
@@ -490,11 +495,13 @@ def _upload_generated_artifact(
     fetch_url: str,
     content_type: str | None,
 ) -> None:
+    attempt_metrics = {"actualAttempts": 0}
     try:
         _upload_file_to_target(
             path=path,
             put_url=put_url,
             content_type=content_type,
+            attempt_metrics=attempt_metrics,
         )
     except Exception as exc:
         _emit_trace_event(
@@ -506,11 +513,10 @@ def _upload_generated_artifact(
             meta={
                 "assetId": asset_id,
                 "artifactType": artifact_type,
-                "path": str(path),
-                "uploadRetryLimit": 3,
-                "fetchUrl": fetch_url,
+                "uploadRetryLimit": ARTIFACT_UPLOAD_ATTEMPTS,
+                "actualAttempts": attempt_metrics["actualAttempts"],
+                "byteCount": attempt_metrics.get("byteCount"),
                 "contentType": content_type,
-                "detail": str(exc),
                 "errorType": exc.__class__.__name__,
             },
         )
