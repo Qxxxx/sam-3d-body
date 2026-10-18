@@ -32,7 +32,7 @@ from api.main import (
     _upload_file_to_target,
     create_app,
 )
-from api.models import VideoInferenceRequest
+from api.models import VideoInferenceRequest, ViewerComparisonConfigModel
 
 
 def _write_dummy_video(path: Path, fps: float, num_frames: int) -> None:
@@ -1071,6 +1071,30 @@ def test_video_inference_request_requires_direct_upload_for_viewer_comparison() 
     assert payload.viewer_comparison.uploads["viewer-data.json"].fetch_url == (
         "r2://test-bucket/viewer/viewer-data.json"
     )
+
+
+def test_viewer_comparison_accepts_only_known_skeleton_export() -> None:
+    base = {
+        "referenceSkeletonPath": "https://assets.example/reference.npz",
+        "referenceRenderPath": "https://assets.example/reference.render.npz",
+        "uploads": {
+            "viewer-data.json": {
+                "putUrl": "https://uploads.example/viewer-data.json",
+                "fetchUrl": "r2://test-bucket/viewer/viewer-data.json",
+                "contentType": "application/json",
+            }
+        },
+    }
+
+    assert ViewerComparisonConfigModel.model_validate(base).skeleton_export is None
+    assert (
+        ViewerComparisonConfigModel.model_validate(
+            {**base, "skeletonExport": "normalized"}
+        ).skeleton_export
+        == "normalized"
+    )
+    with pytest.raises(ValidationError):
+        ViewerComparisonConfigModel.model_validate({**base, "skeletonExport": "raw"})
 
 
 def test_video_inference_request_rejects_legacy_fields() -> None:

@@ -473,6 +473,52 @@ def build_alignment_report(
     }
 
 
+SKELETON_EXPORT_NORMALIZED = "normalized"
+SKELETON_BUFFER_FILES = {
+    "userSkeleton": "user.skeleton.f32.bin",
+    "referenceSkeleton": "reference.skeleton.f32.bin",
+}
+
+
+def write_normalized_skeleton_buffers(
+    user_sequence: SkeletonSequence,
+    reference_sequence: SkeletonSequence,
+    output_dir: str | Path,
+    config: AlignmentConfig | None = None,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Write the skeletons `build_alignment_report` compares, one buffer per person.
+
+    Each buffer holds float32 little-endian values shaped
+    [source frames, joints, 3], already normalized and smoothed exactly as the
+    alignment saw them. A client can align the two people again around a frame
+    pair it fixes (the contact of a stroke) with the same frame distance, so
+    the result agrees with this alignment everywhere the fixed pair allows.
+    """
+    config = config or AlignmentConfig()
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    for key, sequence in (
+        ("userSkeleton", user_sequence),
+        ("referenceSkeleton", reference_sequence),
+    ):
+        normalized = normalize_skeleton_sequence(sequence, config.normalization)
+        (output / SKELETON_BUFFER_FILES[key]).write_bytes(
+            np.ascontiguousarray(normalized, dtype="<f4").tobytes()
+        )
+        counts[key] = int(normalized.shape[0])
+    metadata = {
+        "encoding": "float32-le",
+        "components": 3,
+        "jointCount": int(user_sequence.num_joints),
+        "userFrameCount": counts["userSkeleton"],
+        "referenceFrameCount": counts["referenceSkeleton"],
+        "frameDistance": "mean-joint-euclidean",
+        "description": "Per source frame, the normalized and smoothed skeleton the alignment compared. The frame distance is the mean Euclidean distance over joints.",
+    }
+    return dict(SKELETON_BUFFER_FILES), metadata
+
+
 def load_skeleton_sequence_npz(
     npz_path: str | Path,
     keypoints_key: str = "keypoints_3d",

@@ -31,9 +31,11 @@ from sam_3d_body.reference_assets import (
     save_reference_assets_metadata,
 )
 from sam_3d_body.technique_alignment import (
+    SKELETON_EXPORT_NORMALIZED,
     build_alignment_report,
     load_skeleton_sequence_npz,
     save_alignment_report_json,
+    write_normalized_skeleton_buffers,
 )
 from poc.alignment_3d_viewer.export_assets import export_assets as export_viewer_assets
 from poc.alignment_3d_viewer.export_assets import _load_render_asset
@@ -792,6 +794,12 @@ def _run_video_inference_sync_impl(
             # the shared URL instead, and the GPU host never downloads a copy.
             shared_keys=set(payload.viewer_comparison.shared_files or {}),
         )
+        if payload.viewer_comparison.skeleton_export == SKELETON_EXPORT_NORMALIZED:
+            skeleton_files, skeleton_metadata = write_normalized_skeleton_buffers(
+                bundle.sequence, reference_sequence, viewer_output_dir
+            )
+            viewer_manifest["files"].update(skeleton_files)
+            viewer_manifest["skeleton"] = skeleton_metadata
 
         viewer_files = viewer_manifest.get("files")
         if not isinstance(viewer_files, dict):

@@ -153,6 +153,11 @@ class ViewerComparisonConfigModel(BaseModel):
     # service neither exports nor uploads that file and just points the manifest
     # at the shared copy.
     shared_files: dict[str, str] | None = Field(default=None, alias="sharedFiles")
+    # "normalized" also writes the skeletons the alignment compared, so a client
+    # can align again around a frame pair the person fixes.
+    skeleton_export: str | None = Field(
+        default=None, alias="skeletonExport", max_length=32
+    )
     uploads: dict[str, VideoAssetUploadTargetModel]
 
     @model_validator(mode="after")
@@ -165,6 +170,8 @@ class ViewerComparisonConfigModel(BaseModel):
             raise ValueError(
                 "viewerComparison.positionsExport must be 'canonical' or 'raw-alias'."
             )
+        if self.skeleton_export not in (None, "normalized"):
+            raise ValueError("viewerComparison.skeletonExport must be 'normalized'.")
         if self.shared_files is not None:
             if any(
                 not key.strip() or not value.strip()

@@ -15,6 +15,7 @@ from sam_3d_body.technique_alignment import (
     load_skeleton_sequence_npz,
     normalize_skeleton_sequence,
     resolve_npz_file,
+    write_normalized_skeleton_buffers,
 )
 
 
@@ -173,6 +174,39 @@ def test_build_alignment_report_outputs_expected_sections() -> None:
         "contact",
         "follow_through",
     }
+
+
+def test_skeleton_buffers_hold_what_the_alignment_compared(tmp_path) -> None:
+    user = _make_sequence(_mhr70_frames())
+    reference_frames = np.concatenate([_mhr70_frames(), _mhr70_frames()[1:]]) * 1.2
+    reference = _make_sequence(reference_frames)
+
+    files, metadata = write_normalized_skeleton_buffers(user, reference, tmp_path)
+
+    assert files == {
+        "userSkeleton": "user.skeleton.f32.bin",
+        "referenceSkeleton": "reference.skeleton.f32.bin",
+    }
+    assert metadata["jointCount"] == 70
+    assert metadata["userFrameCount"] == 3
+    assert metadata["referenceFrameCount"] == 5
+    assert metadata["encoding"] == "float32-le"
+    for key, sequence in (("userSkeleton", user), ("referenceSkeleton", reference)):
+        written = np.frombuffer(
+            (tmp_path / files[key]).read_bytes(), dtype="<f4"
+        ).reshape(-1, 70, 3)
+        np.testing.assert_allclose(written, normalize_skeleton_sequence(sequence), atol=1e-6)
+
+    # The frame distance a client computes from the buffers is the one the
+    # alignment reported for each step.
+    report = build_alignment_report(user, reference, config=AlignmentConfig(use_fastdtw=False))
+    user_buffer = np.frombuffer((tmp_path / files["userSkeleton"]).read_bytes(), dtype="<f4").reshape(-1, 70, 3)
+    reference_buffer = np.frombuffer((tmp_path / files["referenceSkeleton"]).read_bytes(), dtype="<f4").reshape(-1, 70, 3)
+    for step in report["alignmentPath"]:
+        distance = np.linalg.norm(
+            user_buffer[step["userFrameIndex"]] - reference_buffer[step["referenceFrameIndex"]], axis=1
+        ).mean()
+        assert distance == pytest.approx(step["distance"], abs=1e-5)
 
 
 def test_load_skeleton_sequence_npz_supports_remote_url(tmp_path, monkeypatch) -> None:
