@@ -942,9 +942,14 @@ def test_run_video_inference_sync_emits_artifact_upload_failed_trace_event(
     )
     assert upload_failed_meta is not None
     assert upload_failed_meta["artifactType"] == "skeleton"
-    assert upload_failed_meta["fetchUrl"] == (
-        "r2://test-bucket/technique/user-assets/user_bundle/skeleton.npz"
-    )
+    # Diagnostics say how the upload went without the storage location or the
+    # local path (fix(api): report safe artifact upload diagnostics).
+    assert upload_failed_meta["uploadRetryLimit"] == ARTIFACT_UPLOAD_ATTEMPTS
+    assert upload_failed_meta["actualAttempts"] == ARTIFACT_UPLOAD_ATTEMPTS
+    assert upload_failed_meta["byteCount"] > 0
+    assert upload_failed_meta["errorType"] == "TimeoutError"
+    for unsafe in ("fetchUrl", "path", "detail"):
+        assert unsafe not in upload_failed_meta
 
 
 def test_run_video_inference_sync_maps_remote_fetch_failures_to_bad_gateway(
